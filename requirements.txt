@@ -1,0 +1,4 @@
+flask
+pymodbus
+requests
+flask-cors
