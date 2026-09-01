@@ -23,13 +23,6 @@ _scheduler_signature = None
 
 
 # ============================================================
-# TRIGGER STATE
-# ============================================================
-
-_last_trigger_value = {}
-
-
-# ============================================================
 # PLC CLIENT
 # ============================================================
 
@@ -268,7 +261,11 @@ def get_client(plc_config):
     try:
         if not _client.is_socket_open():
             if not _client.connect():
-                print("PLC CONNECTION FAILED:", plc_config["ip"], plc_config["port"])
+                print(
+                    "PLC CONNECTION FAILED:",
+                    plc_config["ip"],
+                    plc_config["port"]
+                )
                 return None
     except Exception as e:
         print("PLC CONNECTION ERROR:", e)
@@ -363,12 +360,15 @@ def tag_is_due(mapping, now):
 # ============================================================
 
 def schedule_next(mapping, now):
+
     try:
         interval = float(mapping.get("interval", 1))
     except Exception:
         interval = 1.0
+
     if interval <= 0:
         interval = 1.0
+
     _next_read_time[mapping["name"]] = now + interval
 
 
@@ -387,61 +387,18 @@ def convert_value(value, mapping):
 
     if datatype == "INT":
         return int(value)
+
     if datatype == "FLOAT":
         return float(value)
+
     if datatype == "BOOL":
         return bool(value)
+
     return value
 
 
 # ============================================================
-# TRIGGER HANDLING
-# ============================================================
-
-def _read_trigger_state(client, mappings, slave):
-    """Read each distinct trigger register once and return its values."""
-
-    trigger_registers = sorted({
-        int(mapping["trigger_register"])
-        for mapping in mappings
-        if mapping["storage"] == "TRIGGER"
-        and mapping.get("trigger_register") not in (None, "", 0)
-    })
-
-    trigger_states = {}
-
-    for register in trigger_registers:
-        value = read_register(client, register, slave)
-        if value is not None:
-            trigger_states[register] = value
-
-    return trigger_states
-
-
-def _trigger_rose(mapping, trigger_states):
-    register = mapping.get("trigger_register")
-    if register in (None, "", 0):
-        return False
-
-    try:
-        register = int(register)
-    except Exception:
-        return False
-
-    if register not in trigger_states:
-        return False
-
-    current_value = trigger_states[register]
-    last_value = _last_trigger_value.get(register)
-
-    # First observation establishes state but does not create a false rising edge.
-    _last_trigger_value[register] = current_value
-
-    return last_value is not None and current_value != last_value and float(current_value) == float(mapping.get("trigger_value", 0))
-
-
-# ============================================================
-# READ ALL DUE TAGS
+# READ ALL TAGS
 # ============================================================
 
 def read_all():
@@ -452,6 +409,7 @@ def read_all():
         return {}
 
     update_scheduler(mappings)
+
     now = time.time()
     client = get_client(plc_config)
 
@@ -462,10 +420,13 @@ def read_all():
     data = {}
 
     # --------------------------------------------------------
-    # TIME TAGS
+    # TIME STORAGE
+    # --------------------------------------------------------
+    # TIME tags are read according to their configured interval.
     # --------------------------------------------------------
 
     for mapping in mappings:
+
         if mapping["storage"] != "TIME":
             continue
 
@@ -474,59 +435,135 @@ def read_all():
 
         register = mapping["register"]
         name = mapping["name"]
-        value = read_register(client, register, slave)
-        schedule_next(mapping, now)
+
+        value = read_register(
+            client,
+            register,
+            slave
+        )
+
+        schedule_next(
+            mapping,
+            now
+        )
 
         if value is None:
             continue
 
         try:
-            value = convert_value(value, mapping)
+            value = convert_value(
+                value,
+                mapping
+            )
         except Exception as e:
-            print("VALUE CONVERSION ERROR:", name, e)
+            print(
+                "VALUE CONVERSION ERROR:",
+                name,
+                e
+            )
             continue
 
         data[name] = value
-        print("DUE:", name, value, "REGISTER:", register, "INTERVAL:", mapping["interval"])
+
+        print(
+            "DUE:",
+            name,
+            value,
+            "REGISTER:",
+            register,
+            "INTERVAL:",
+            mapping["interval"]
+        )
 
     # --------------------------------------------------------
-    # TRIGGER TAGS
+    # TRIGGER STORAGE
     # --------------------------------------------------------
-    # Every TRIGGER mapping is handled here. Once its configured
-    # trigger changes to the configured trigger value, its own
-    # register is read and added to the same outgoing payload.
-    # This includes ContractCode/ProductCode and any future tag.
+    # Read each distinct trigger register ONCE.
+    # If its configured condition is true, read EVERY TagMapper
+    # mapping that uses that trigger register/value and put ALL of
+    # them into the same outgoing data dictionary.
+    # This includes ContractCode/ProductCode and any future tags.
     # --------------------------------------------------------
 
-    trigger_states = _read_trigger_state(client, mappings, slave)
+    trigger_mappings = [
+        mapping
+        for mapping in mappings
+        if mapping["storage"] == "TRIGGER"
+        and mapping.get("trigger_register") not in (None, "", 0)
+    ]
 
-    if trigger_states:
-        for mapping in mappings:
-            if mapping["storage"] != "TRIGGER":
-                continue
+    trigger_registers = sorted({
+        int(mapping["trigger_register"])
+        for mapping in trigger_mappings
+    })
 
-            if not _trigger_rose(mapping, trigger_states):
+    for trigger_register in trigger_registers:
+
+        trigger_value = read_register(
+            client,
+            trigger_register,
+            slave
+        )
+
+        if trigger_value is None:
+            continue
+
+        # Grouped by register: one trigger read controls all dependent tags.
+        dependent = [
+            mapping
+            for mapping in trigger_mappings
+            if int(mapping["trigger_register"]) == trigger_register
+        ]
+
+        for mapping in dependent:
+
+            expected = mapping.get("trigger_value", 0)
+
+            try:
+                condition_met = float(trigger_value) == float(expected)
+            except Exception:
+                condition_met = trigger_value == expected
+
+            if not condition_met:
                 continue
 
             register = mapping["register"]
             name = mapping["name"]
-            value = read_register(client, register, slave)
+
+            value = read_register(
+                client,
+                register,
+                slave
+            )
 
             if value is None:
                 continue
 
             try:
-                value = convert_value(value, mapping)
+                value = convert_value(
+                    value,
+                    mapping
+                )
             except Exception as e:
-                print("VALUE CONVERSION ERROR:", name, e)
+                print(
+                    "VALUE CONVERSION ERROR:",
+                    name,
+                    e
+                )
                 continue
 
             data[name] = value
+
             print(
-                "TRIGGER:", name, value,
-                "REGISTER:", register,
-                "TRIGGER REGISTER:", mapping["trigger_register"],
-                "TRIGGER VALUE:", mapping["trigger_value"]
+                "TRIGGER:",
+                name,
+                value,
+                "REGISTER:",
+                register,
+                "TRIGGER REGISTER:",
+                trigger_register,
+                "TRIGGER VALUE:",
+                expected
             )
 
     return data
