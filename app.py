@@ -1,7 +1,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from plc import read_all
+from plc_parallel import read_all
 from sender import send_all
 
 import threading
