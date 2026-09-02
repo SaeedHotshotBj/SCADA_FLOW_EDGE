@@ -1,5 +1,6 @@
 import requests
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 
@@ -78,8 +79,8 @@ def send_all(data):
     # ]
     if isinstance(data, list):
 
+        items = []
         for item in data:
-
             if not isinstance(item, dict):
                 continue
 
@@ -91,20 +92,55 @@ def send_all(data):
             if plc_id is None or tag is None:
                 continue
 
-            result = send_tag(
+            items.append((
                 plc_id,
                 tag,
                 value,
-                communication_timeout=communication_timeout
-            )
+                communication_timeout,
+            ))
 
-            print(
-                "SENT:",
-                "PLC_ID:", plc_id,
-                tag,
-                value,
-                result
-            )
+        if not items:
+            return
+
+        # Each HTTP POST is independent. Sending them concurrently prevents
+        # one PLC or one slow request from delaying every other PLC.
+        max_workers = max(1, min(len(items), 32))
+
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="SCADA_EDGE_SEND"
+        ) as executor:
+            futures = {
+                executor.submit(
+                    send_tag,
+                    plc_id,
+                    tag,
+                    value,
+                    communication_timeout,
+                ): (plc_id, tag, value)
+                for plc_id, tag, value, communication_timeout in items
+            }
+
+            for future in as_completed(futures):
+                plc_id, tag, value = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = None
+                    print(
+                        "SEND TASK ERROR:",
+                        "PLC_ID:", plc_id,
+                        tag,
+                        exc
+                    )
+
+                print(
+                    "SENT:",
+                    "PLC_ID:", plc_id,
+                    tag,
+                    value,
+                    result
+                )
 
         return
 
