@@ -23,11 +23,12 @@ _scheduler_signature = None
 
 
 # ============================================================
-# PLC CLIENT
+# PLC CLIENTS
+# One persistent Modbus client per PLC.
 # ============================================================
 
-_client = None
-_client_config = None
+_clients = {}
+_client_configs = {}
 
 
 # ============================================================
@@ -75,29 +76,43 @@ def get_flow_config(force=False):
 
 
 # ============================================================
-# EXTRACT RUNTIME CONFIGURATION
+# HELPERS
 # ============================================================
 
-def get_runtime_configuration():
+def _node_connections(nodes, node_id, direction="inputs"):
+    node = nodes.get(str(node_id), {})
+    result = []
 
-    flow = get_flow_config()
+    section = node.get(direction, {})
+    if not isinstance(section, dict):
+        return result
 
-    if not flow:
-        return None, []
+    for item in section.values():
+        if not isinstance(item, dict):
+            continue
+        connections = item.get("connections", [])
+        if not isinstance(connections, list):
+            continue
+        for connection in connections:
+            target = connection.get("node")
+            if target is not None:
+                result.append(str(target))
 
-    try:
-        nodes = flow["drawflow"]["Home"]["data"]
-    except Exception as e:
-        print("FLOW FORMAT ERROR:", e)
-        return None, []
+    return result
 
-    # --------------------------------------------------------
-    # PLC READER
-    # --------------------------------------------------------
 
-    plc_config = None
+def _extract_plc_configs(nodes):
+    """Build every PLCReader configuration.
 
-    for node in nodes.values():
+    PLC ID is taken from PLCReader.data.plc_id when present. For legacy
+    flows where it is missing, IDs are assigned deterministically in
+    PLCReader order, preserving the first PLC as config.PLC_ID.
+    """
+    plc_configs = {}
+    used_ids = set()
+    fallback_id = int(getattr(config, "PLC_ID", 1))
+
+    for node_id, node in nodes.items():
         if node.get("class") != "PLCReader":
             continue
 
@@ -109,8 +124,12 @@ def get_runtime_configuration():
         ]
 
         if missing:
-            print("PLCReader CONFIGURATION INCOMPLETE:", missing)
-            return None, []
+            print(
+                "PLCReader CONFIGURATION INCOMPLETE:",
+                "NODE:", node_id,
+                "MISSING:", missing
+            )
+            continue
 
         try:
             port = int(data["port"])
@@ -118,45 +137,136 @@ def get_runtime_configuration():
             register = int(data["register"])
             count = int(data["count"])
         except Exception as e:
-            print("PLCReader CONFIGURATION ERROR:", e)
-            return None, []
+            print(
+                "PLCReader CONFIGURATION ERROR:",
+                "NODE:", node_id,
+                e
+            )
+            continue
 
         if port <= 0 or slave < 0 or register < 0 or count <= 0:
-            print("INVALID PLCReader CONFIGURATION")
-            return None, []
+            print("INVALID PLCReader CONFIGURATION:", node_id)
+            continue
 
-        plc_config = {
+        raw_plc_id = data.get("plc_id")
+
+        try:
+            if raw_plc_id is not None and str(raw_plc_id).strip() != "":
+                plc_id = int(raw_plc_id)
+            else:
+                while fallback_id in used_ids:
+                    fallback_id += 1
+                plc_id = fallback_id
+                fallback_id += 1
+        except (TypeError, ValueError):
+            while fallback_id in used_ids:
+                fallback_id += 1
+            plc_id = fallback_id
+            fallback_id += 1
+
+        if plc_id <= 0:
+            print("INVALID PLC_ID:", node_id, plc_id)
+            continue
+
+        if plc_id in used_ids:
+            print(
+                "DUPLICATE PLC_ID; USING AUTOMATIC ID:",
+                "NODE:", node_id,
+                "REQUESTED:", plc_id
+            )
+            while fallback_id in used_ids:
+                fallback_id += 1
+            plc_id = fallback_id
+            fallback_id += 1
+
+        used_ids.add(plc_id)
+
+        plc_configs[plc_id] = {
+            "plc_id": plc_id,
+            "node_id": str(node_id),
             "ip": str(data["ip"]),
             "port": port,
             "slave": slave,
             "register": register,
             "count": count,
         }
-        break
 
-    if plc_config is None:
+    return plc_configs
+
+
+def _find_upstream_plc_ids(nodes, tagmapper_id, plc_node_to_id):
+    """Return PLC IDs connected directly to a TagMapper.
+
+    This follows the actual Drawflow graph and therefore also works when
+    a TagMapper is connected to more than one PLCReader.
+    """
+    result = []
+
+    for source_node_id, plc_id in plc_node_to_id.items():
+        if str(tagmapper_id) in _node_connections(
+            nodes,
+            source_node_id,
+            direction="outputs"
+        ):
+            result.append(plc_id)
+
+    return result
+
+
+# ============================================================
+# EXTRACT RUNTIME CONFIGURATION
+# ============================================================
+
+def get_runtime_configuration():
+    flow = get_flow_config()
+
+    if not flow:
+        return [], []
+
+    try:
+        nodes = flow["drawflow"]["Home"]["data"]
+    except Exception as e:
+        print("FLOW FORMAT ERROR:", e)
+        return [], []
+
+    plc_configs = _extract_plc_configs(nodes)
+
+    if not plc_configs:
         print("NO PLCReader NODE FOUND")
-        return None, []
+        return [], []
+
+    plc_node_to_id = {
+        config_item["node_id"]: plc_id
+        for plc_id, config_item in plc_configs.items()
+    }
 
     # --------------------------------------------------------
-    # TAG MAPPER
+    # TAG MAPPERS
     # --------------------------------------------------------
 
     mappings = []
 
-    for node in nodes.values():
+    for node_id, node in nodes.items():
         if node.get("class") != "TagMapper":
             continue
 
         data = node.get("data", {})
         node_mappings = data.get("mappings", [])
+        if not isinstance(node_mappings, list):
+            continue
 
-        for mapping in node_mappings:
-            if not isinstance(mapping, dict):
+        upstream_plc_ids = _find_upstream_plc_ids(
+            nodes,
+            node_id,
+            plc_node_to_id
+        )
+
+        for raw_mapping in node_mappings:
+            if not isinstance(raw_mapping, dict):
                 continue
 
-            name = mapping.get("name")
-            register_value = mapping.get("register")
+            name = raw_mapping.get("name")
+            register_value = raw_mapping.get("register")
 
             if name is None or str(name).strip() == "":
                 continue
@@ -166,7 +276,7 @@ def get_runtime_configuration():
             try:
                 register = int(register_value)
             except Exception:
-                print("INVALID TAG REGISTER:", mapping)
+                print("INVALID TAG REGISTER:", raw_mapping)
                 continue
 
             if register < 0:
@@ -174,55 +284,90 @@ def get_runtime_configuration():
                 continue
 
             try:
-                scale = float(mapping.get("scale", 1))
+                scale = float(raw_mapping.get("scale", 1))
             except Exception:
                 scale = 1.0
 
             try:
-                interval = float(mapping.get("interval", 1))
+                interval = float(raw_mapping.get("interval", 1))
             except Exception:
                 interval = 1.0
             if interval <= 0:
                 interval = 1.0
 
-            datatype = str(mapping.get("datatype", "INT")).upper()
-            storage = str(mapping.get("storage", "TIME")).upper()
+            datatype = str(raw_mapping.get("datatype", "INT")).upper()
+            storage = str(raw_mapping.get("storage", "TIME")).upper()
 
-            trigger_register = mapping.get("trigger_register", 0)
-            trigger_value = mapping.get("trigger_value", 0)
+            trigger_register = raw_mapping.get("trigger_register", 0)
+            trigger_value = raw_mapping.get("trigger_value", 0)
 
             try:
                 if trigger_register not in (None, ""):
                     trigger_register = int(trigger_register)
+                else:
+                    trigger_register = 0
             except Exception:
-                print("INVALID TRIGGER REGISTER:", mapping)
+                print("INVALID TRIGGER REGISTER:", raw_mapping)
                 trigger_register = 0
 
             try:
                 if trigger_value not in (None, ""):
                     trigger_value = float(trigger_value)
+                else:
+                    trigger_value = 0
             except Exception:
-                print("INVALID TRIGGER VALUE:", mapping)
+                print("INVALID TRIGGER VALUE:", raw_mapping)
                 trigger_value = 0
 
-            mappings.append({
-                "register": register,
-                "name": str(name),
-                "datatype": datatype,
-                "scale": scale,
-                "storage": storage,
-                "interval": interval,
-                "trigger_register": trigger_register,
-                "trigger_value": trigger_value,
-            })
+            explicit_plc_id = raw_mapping.get("plc_id")
+            mapping_plc_ids = []
 
-        break
+            if explicit_plc_id not in (None, ""):
+                try:
+                    mapping_plc_ids = [int(explicit_plc_id)]
+                except (TypeError, ValueError):
+                    print(
+                        "INVALID TAG PLC_ID:",
+                        raw_mapping
+                    )
+                    continue
+            elif upstream_plc_ids:
+                mapping_plc_ids = list(dict.fromkeys(upstream_plc_ids))
+            elif len(plc_configs) == 1:
+                mapping_plc_ids = [next(iter(plc_configs))]
+            else:
+                print(
+                    "TAG PLC_ID AMBIGUOUS; SKIPPING TAG:",
+                    name,
+                    "NODE:", node_id
+                )
+                continue
+
+            for plc_id in mapping_plc_ids:
+                if plc_id not in plc_configs:
+                    print(
+                        "TAG REFERENCES UNKNOWN PLC_ID:",
+                        plc_id,
+                        "TAG:", name
+                    )
+                    continue
+
+                mappings.append({
+                    "plc_id": plc_id,
+                    "register": register,
+                    "name": str(name),
+                    "datatype": datatype,
+                    "scale": scale,
+                    "storage": storage,
+                    "interval": interval,
+                    "trigger_register": trigger_register,
+                    "trigger_value": trigger_value,
+                })
 
     if not mappings:
         print("NO TAG MAPPINGS FOUND")
-        return plc_config, []
 
-    return plc_config, mappings
+    return list(plc_configs.values()), mappings
 
 
 # ============================================================
@@ -230,48 +375,60 @@ def get_runtime_configuration():
 # ============================================================
 
 def get_client(plc_config):
-
-    global _client
-    global _client_config
-
+    plc_id = int(plc_config["plc_id"])
     current_config = (
         plc_config["ip"],
         plc_config["port"],
         plc_config["slave"]
     )
 
-    if _client_config != current_config:
-        if _client is not None:
+    old_config = _client_configs.get(plc_id)
+
+    if old_config != current_config:
+        old_client = _clients.get(plc_id)
+        if old_client is not None:
             try:
-                _client.close()
+                old_client.close()
             except Exception:
                 pass
 
-        _client = None
-        _client_config = current_config
-        print("PLC CLIENT CONFIGURATION UPDATED:", current_config)
+        _clients.pop(plc_id, None)
+        _client_configs[plc_id] = current_config
+        print(
+            "PLC CLIENT CONFIGURATION UPDATED:",
+            "PLC_ID:", plc_id,
+            current_config
+        )
 
-    if _client is None:
-        _client = ModbusTcpClient(
+    client = _clients.get(plc_id)
+
+    if client is None:
+        client = ModbusTcpClient(
             plc_config["ip"],
             port=plc_config["port"],
             timeout=3
         )
+        _clients[plc_id] = client
 
     try:
-        if not _client.is_socket_open():
-            if not _client.connect():
+        if not client.is_socket_open():
+            if not client.connect():
                 print(
                     "PLC CONNECTION FAILED:",
+                    "PLC_ID:", plc_id,
                     plc_config["ip"],
                     plc_config["port"]
                 )
                 return None
     except Exception as e:
-        print("PLC CONNECTION ERROR:", e)
+        print(
+            "PLC CONNECTION ERROR:",
+            "PLC_ID:", plc_id,
+            e
+        )
         return None
 
-    return _client
+    return client
 
 
 # ============================================================
@@ -279,7 +436,6 @@ def get_client(plc_config):
 # ============================================================
 
 def read_register(client, address, slave):
-
     try:
         result = client.read_holding_registers(
             address=int(address),
@@ -316,12 +472,12 @@ def read_register(client, address, slave):
 # ============================================================
 
 def update_scheduler(mappings):
-
     global _scheduler_signature
     global _next_read_time
 
     signature = tuple(
         (
+            mapping["plc_id"],
             mapping["name"],
             mapping["register"],
             mapping["interval"],
@@ -340,10 +496,18 @@ def update_scheduler(mappings):
     old_schedule = dict(_next_read_time)
     _scheduler_signature = signature
     now = time.time()
+
     _next_read_time = {
-        mapping["name"]: old_schedule.get(mapping["name"], now)
+        (
+            mapping["plc_id"],
+            mapping["name"]
+        ): old_schedule.get(
+            (mapping["plc_id"], mapping["name"]),
+            now
+        )
         for mapping in mappings
     }
+
     print("TAG SCHEDULE UPDATED")
 
 
@@ -352,7 +516,8 @@ def update_scheduler(mappings):
 # ============================================================
 
 def tag_is_due(mapping, now):
-    return now >= _next_read_time.get(mapping["name"], 0)
+    key = (mapping["plc_id"], mapping["name"])
+    return now >= _next_read_time.get(key, 0)
 
 
 # ============================================================
@@ -360,7 +525,6 @@ def tag_is_due(mapping, now):
 # ============================================================
 
 def schedule_next(mapping, now):
-
     try:
         interval = float(mapping.get("interval", 1))
     except Exception:
@@ -369,7 +533,8 @@ def schedule_next(mapping, now):
     if interval <= 0:
         interval = 1.0
 
-    _next_read_time[mapping["name"]] = now + interval
+    key = (mapping["plc_id"], mapping["name"])
+    _next_read_time[key] = now + interval
 
 
 # ============================================================
@@ -377,7 +542,6 @@ def schedule_next(mapping, now):
 # ============================================================
 
 def convert_value(value, mapping):
-
     try:
         value = float(value) * float(mapping.get("scale", 1))
     except Exception:
@@ -398,133 +562,45 @@ def convert_value(value, mapping):
 
 
 # ============================================================
-# READ ALL TAGS
+# READ ALL TAGS FROM ALL PLCS
 # ============================================================
 
 def read_all():
+    plc_configs, mappings = get_runtime_configuration()
 
-    plc_config, mappings = get_runtime_configuration()
-
-    if not plc_config or not mappings:
-        return {}
+    if not plc_configs or not mappings:
+        return []
 
     update_scheduler(mappings)
 
     now = time.time()
-    client = get_client(plc_config)
+    data = []
 
-    if client is None:
-        return {}
-
-    slave = plc_config["slave"]
-    data = {}
-
-    # --------------------------------------------------------
-    # TIME STORAGE
-    # --------------------------------------------------------
-    # TIME tags are read according to their configured interval.
-    # --------------------------------------------------------
-
+    mappings_by_plc = {}
     for mapping in mappings:
+        mappings_by_plc.setdefault(mapping["plc_id"], []).append(mapping)
 
-        if mapping["storage"] != "TIME":
+    for plc_config in plc_configs:
+        plc_id = plc_config["plc_id"]
+        plc_mappings = mappings_by_plc.get(plc_id, [])
+
+        if not plc_mappings:
             continue
 
-        if not tag_is_due(mapping, now):
+        client = get_client(plc_config)
+        if client is None:
             continue
 
-        register = mapping["register"]
-        name = mapping["name"]
+        slave = plc_config["slave"]
 
-        value = read_register(
-            client,
-            register,
-            slave
-        )
+        # ----------------------------------------------------
+        # TIME STORAGE
+        # ----------------------------------------------------
+        for mapping in plc_mappings:
+            if mapping["storage"] != "TIME":
+                continue
 
-        schedule_next(
-            mapping,
-            now
-        )
-
-        if value is None:
-            continue
-
-        try:
-            value = convert_value(
-                value,
-                mapping
-            )
-        except Exception as e:
-            print(
-                "VALUE CONVERSION ERROR:",
-                name,
-                e
-            )
-            continue
-
-        data[name] = value
-
-        print(
-            "DUE:",
-            name,
-            value,
-            "REGISTER:",
-            register,
-            "INTERVAL:",
-            mapping["interval"]
-        )
-
-    # --------------------------------------------------------
-    # TRIGGER STORAGE
-    # --------------------------------------------------------
-    # Read each distinct trigger register ONCE.
-    # If its configured condition is true, read EVERY TagMapper
-    # mapping that uses that trigger register/value and put ALL of
-    # them into the same outgoing data dictionary.
-    # This includes ContractCode/ProductCode and any future tags.
-    # --------------------------------------------------------
-
-    trigger_mappings = [
-        mapping
-        for mapping in mappings
-        if mapping["storage"] == "TRIGGER"
-        and mapping.get("trigger_register") not in (None, "", 0)
-    ]
-
-    trigger_registers = sorted({
-        int(mapping["trigger_register"])
-        for mapping in trigger_mappings
-    })
-
-    for trigger_register in trigger_registers:
-
-        trigger_value = read_register(
-            client,
-            trigger_register,
-            slave
-        )
-
-        if trigger_value is None:
-            continue
-
-        # Grouped by register: one trigger read controls all dependent tags.
-        dependent = [
-            mapping
-            for mapping in trigger_mappings
-            if int(mapping["trigger_register"]) == trigger_register
-        ]
-
-        for mapping in dependent:
-
-            expected = mapping.get("trigger_value", 0)
-
-            try:
-                condition_met = float(trigger_value) == float(expected)
-            except Exception:
-                condition_met = trigger_value == expected
-
-            if not condition_met:
+            if not tag_is_due(mapping, now):
                 continue
 
             register = mapping["register"]
@@ -536,34 +612,118 @@ def read_all():
                 slave
             )
 
+            schedule_next(mapping, now)
+
             if value is None:
                 continue
 
             try:
-                value = convert_value(
-                    value,
-                    mapping
-                )
+                value = convert_value(value, mapping)
             except Exception as e:
                 print(
                     "VALUE CONVERSION ERROR:",
+                    "PLC_ID:", plc_id,
                     name,
                     e
                 )
                 continue
 
-            data[name] = value
+            data.append({
+                "PLC_ID": plc_id,
+                "TagName": name,
+                "Value": value,
+            })
 
             print(
-                "TRIGGER:",
+                "DUE:",
+                "PLC_ID:", plc_id,
                 name,
                 value,
-                "REGISTER:",
-                register,
-                "TRIGGER REGISTER:",
-                trigger_register,
-                "TRIGGER VALUE:",
-                expected
+                "REGISTER:", register,
+                "INTERVAL:", mapping["interval"]
             )
+
+        # ----------------------------------------------------
+        # TRIGGER STORAGE
+        # ----------------------------------------------------
+        trigger_mappings = [
+            mapping
+            for mapping in plc_mappings
+            if mapping["storage"] == "TRIGGER"
+            and mapping.get("trigger_register") not in (None, "", 0)
+        ]
+
+        trigger_registers = sorted({
+            int(mapping["trigger_register"])
+            for mapping in trigger_mappings
+        })
+
+        for trigger_register in trigger_registers:
+            trigger_value = read_register(
+                client,
+                trigger_register,
+                slave
+            )
+
+            if trigger_value is None:
+                continue
+
+            dependent = [
+                mapping
+                for mapping in trigger_mappings
+                if int(mapping["trigger_register"]) == trigger_register
+            ]
+
+            for mapping in dependent:
+                expected = mapping.get("trigger_value", 0)
+
+                try:
+                    condition_met = (
+                        float(trigger_value) == float(expected)
+                    )
+                except Exception:
+                    condition_met = trigger_value == expected
+
+                if not condition_met:
+                    continue
+
+                register = mapping["register"]
+                name = mapping["name"]
+
+                value = read_register(
+                    client,
+                    register,
+                    slave
+                )
+
+                if value is None:
+                    continue
+
+                try:
+                    value = convert_value(value, mapping)
+                except Exception as e:
+                    print(
+                        "VALUE CONVERSION ERROR:",
+                        "PLC_ID:", plc_id,
+                        name,
+                        e
+                    )
+                    continue
+
+                data.append({
+                    "PLC_ID": plc_id,
+                    "TagName": name,
+                    "Value": value,
+                })
+
+                print(
+                    "TRIGGER:",
+                    "PLC_ID:", plc_id,
+                    name,
+                    value,
+                    "REGISTER:", register,
+                    "TRIGGER REGISTER:", trigger_register,
+                    "TRIGGER VALUE:", expected
+                )
 
     return data
