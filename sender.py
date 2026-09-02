@@ -8,7 +8,7 @@ import config
 # SEND ONE TAG
 # =====================================================
 
-def send_tag(plc_id, tag, value):
+def send_tag(plc_id, tag, value, communication_timeout=None):
 
     payload = {
         "PLC_ID": plc_id,
@@ -24,10 +24,18 @@ def send_tag(plc_id, tag, value):
 
     try:
 
+        request_kwargs = {
+            "json": payload
+        }
+
+        # The timeout is part of the PLCReader Flow configuration.
+        # When it is blank in Flow, no client-side timeout is imposed here.
+        if communication_timeout not in (None, ""):
+            request_kwargs["timeout"] = float(communication_timeout)
+
         response = requests.post(
             url,
-            json=payload,
-            timeout=5
+            **request_kwargs
         )
 
         if response.status_code != 200:
@@ -61,8 +69,12 @@ def send_all(data):
 
     # New multi-PLC format from plc.read_all():
     # [
-    #   {"PLC_ID": 1, "TagName": "voltage", "Value": 220},
-    #   {"PLC_ID": 2, "TagName": "Voltage1", "Value": 230}
+    #   {
+    #       "PLC_ID": 1,
+    #       "TagName": "voltage",
+    #       "Value": 220,
+    #       "CommunicationTimeout": 10
+    #   }
     # ]
     if isinstance(data, list):
 
@@ -74,6 +86,7 @@ def send_all(data):
             plc_id = item.get("PLC_ID")
             tag = item.get("TagName")
             value = item.get("Value")
+            communication_timeout = item.get("CommunicationTimeout")
 
             if plc_id is None or tag is None:
                 continue
@@ -81,7 +94,8 @@ def send_all(data):
             result = send_tag(
                 plc_id,
                 tag,
-                value
+                value,
+                communication_timeout=communication_timeout
             )
 
             print(
