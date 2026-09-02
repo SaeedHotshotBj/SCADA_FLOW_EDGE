@@ -52,10 +52,12 @@ def get_flow_config(force=False):
     url = config.SERVER_URL.rstrip("/") + "/api/edge/config"
 
     try:
+        # No hardcoded network timeout here: the timeout belongs to the
+        # PLCReader node inside the Flow. This first request is required
+        # to obtain that Flow configuration.
         response = requests.get(
             url,
-            params={"PLC_ID": config.PLC_ID},
-            timeout=5
+            params={"PLC_ID": config.PLC_ID}
         )
         response.raise_for_status()
 
@@ -99,6 +101,31 @@ def _node_connections(nodes, node_id, direction="inputs"):
                 result.append(str(target))
 
     return result
+
+
+def _parse_communication_timeout(raw_value, node_id):
+    if raw_value in (None, ""):
+        return None
+
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        print(
+            "INVALID COMMUNICATION TIMEOUT:",
+            "NODE:", node_id,
+            raw_value
+        )
+        return None
+
+    if value <= 0:
+        print(
+            "INVALID COMMUNICATION TIMEOUT:",
+            "NODE:", node_id,
+            raw_value
+        )
+        return None
+
+    return value
 
 
 def _extract_plc_configs(nodes):
@@ -148,6 +175,11 @@ def _extract_plc_configs(nodes):
             print("INVALID PLCReader CONFIGURATION:", node_id)
             continue
 
+        communication_timeout = _parse_communication_timeout(
+            data.get("communication_timeout"),
+            node_id
+        )
+
         raw_plc_id = data.get("plc_id")
 
         try:
@@ -189,6 +221,7 @@ def _extract_plc_configs(nodes):
             "slave": slave,
             "register": register,
             "count": count,
+            "communication_timeout": communication_timeout,
         }
 
     return plc_configs
@@ -379,7 +412,8 @@ def get_client(plc_config):
     current_config = (
         plc_config["ip"],
         plc_config["port"],
-        plc_config["slave"]
+        plc_config["slave"],
+        plc_config.get("communication_timeout")
     )
 
     old_config = _client_configs.get(plc_id)
@@ -403,10 +437,16 @@ def get_client(plc_config):
     client = _clients.get(plc_id)
 
     if client is None:
+        client_kwargs = {
+            "port": plc_config["port"]
+        }
+        communication_timeout = plc_config.get("communication_timeout")
+        if communication_timeout not in (None, ""):
+            client_kwargs["timeout"] = float(communication_timeout)
+
         client = ModbusTcpClient(
             plc_config["ip"],
-            port=plc_config["port"],
-            timeout=3
+            **client_kwargs
         )
         _clients[plc_id] = client
 
@@ -592,6 +632,7 @@ def read_all():
             continue
 
         slave = plc_config["slave"]
+        communication_timeout = plc_config.get("communication_timeout")
 
         # ----------------------------------------------------
         # TIME STORAGE
@@ -632,6 +673,7 @@ def read_all():
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
+                "CommunicationTimeout": communication_timeout,
             })
 
             print(
@@ -714,6 +756,7 @@ def read_all():
                     "PLC_ID": plc_id,
                     "TagName": name,
                     "Value": value,
+                    "CommunicationTimeout": communication_timeout,
                 })
 
                 print(
