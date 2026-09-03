@@ -1,3 +1,5 @@
+import time
+
 import requests
 
 import config
@@ -5,7 +7,9 @@ import plc
 
 
 POLL_TIMEOUT = 5
+POLL_INTERVAL = 0.5
 RESULT_TIMEOUT = 5
+_next_poll_time = 0.0
 
 
 def _write_register(client, address, value, slave):
@@ -56,6 +60,13 @@ def _report_result(command_id, plc_id, success, error_message=None):
 
 def process_one_write_command():
     """Fetch at most one pending Master write and execute it on this Edge PLC."""
+    global _next_poll_time
+
+    now = time.monotonic()
+    if now < _next_poll_time:
+        return
+    _next_poll_time = now + POLL_INTERVAL
+
     url = config.SERVER_URL.rstrip("/") + "/api/edge/write_command"
 
     try:
