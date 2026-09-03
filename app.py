@@ -3,6 +3,7 @@ from flask_cors import CORS
 
 from plc_parallel import read_all
 from sender import send_all
+from write_commands import process_one_write_command
 
 import threading
 import time
@@ -37,6 +38,10 @@ def plc_loop():
     while running:
 
         try:
+
+            # Master PLC writes are handled through the same outbound
+            # Edge -> VPS connection used by the normal data pipeline.
+            process_one_write_command()
 
             data = read_all()
 
