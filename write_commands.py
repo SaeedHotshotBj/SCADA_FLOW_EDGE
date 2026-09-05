@@ -58,27 +58,20 @@ def _report_result(command_id, plc_id, success, error_message=None):
         print("WRITE RESULT CONNECTION ERROR:", exc)
 
 
-def process_one_write_command():
-    """Fetch at most one pending Master write and execute it on this Edge PLC."""
-    global _next_poll_time
-
-    now = time.monotonic()
-    if now < _next_poll_time:
-        return
-    _next_poll_time = now + POLL_INTERVAL
-
+def _process_command_for_plc(plc_id):
     url = config.SERVER_URL.rstrip("/") + "/api/edge/write_command"
 
     try:
         response = requests.get(
             url,
-            params={"PLC_ID": int(config.PLC_ID)},
+            params={"PLC_ID": int(plc_id)},
             timeout=POLL_TIMEOUT,
         )
 
         if response.status_code != 200:
             print(
                 "WRITE COMMAND SERVER ERROR:",
+                "PLC_ID:", plc_id,
                 response.status_code,
                 response.text,
             )
@@ -86,7 +79,11 @@ def process_one_write_command():
 
         payload = response.json()
     except Exception as exc:
-        print("WRITE COMMAND POLL ERROR:", exc)
+        print(
+            "WRITE COMMAND POLL ERROR:",
+            "PLC_ID:", plc_id,
+            exc,
+        )
         return
 
     if payload.get("status") != "ok":
@@ -96,7 +93,7 @@ def process_one_write_command():
 
     try:
         command_id = int(command["CommandID"])
-        plc_id = int(command["PLC_ID"])
+        command_plc_id = int(command["PLC_ID"])
         register = int(command["Register"])
         value = int(command["Value"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -106,7 +103,7 @@ def process_one_write_command():
     if not 0 <= register <= 65535 or not 0 <= value <= 65535:
         _report_result(
             command_id,
-            plc_id,
+            command_plc_id,
             False,
             "Register and value must be between 0 and 65535",
         )
@@ -118,7 +115,7 @@ def process_one_write_command():
             (
                 item
                 for item in plc_configs
-                if int(item["plc_id"]) == plc_id
+                if int(item["plc_id"]) == command_plc_id
             ),
             None,
         )
@@ -140,17 +137,54 @@ def process_one_write_command():
         print(
             "PLC WRITE SUCCESS:",
             "CommandID:", command_id,
-            "PLC_ID:", plc_id,
+            "PLC_ID:", command_plc_id,
             "REGISTER:", register,
             "VALUE:", value,
         )
-        _report_result(command_id, plc_id, True)
+        _report_result(command_id, command_plc_id, True)
 
     except Exception as exc:
         print(
             "PLC WRITE FAILED:",
             "CommandID:", command_id,
-            "PLC_ID:", plc_id,
+            "PLC_ID:", command_plc_id,
             exc,
         )
-        _report_result(command_id, plc_id, False, str(exc))
+        _report_result(command_id, command_plc_id, False, str(exc))
+
+
+def process_one_write_command():
+    """Fetch one pending Master write for each PLC defined by the Flow."""
+    global _next_poll_time
+
+    now = time.monotonic()
+    if now < _next_poll_time:
+        return
+    _next_poll_time = now + POLL_INTERVAL
+
+    try:
+        plc_configs, _ = plc.get_runtime_configuration()
+    except Exception as exc:
+        print("WRITE COMMAND PLC CONFIG ERROR:", exc)
+        return
+
+    plc_ids = []
+    for plc_config in plc_configs or []:
+        try:
+            plc_id = int(plc_config["plc_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if plc_id > 0 and plc_id not in plc_ids:
+            plc_ids.append(plc_id)
+
+    if not plc_ids:
+        fallback_plc_id = getattr(config, "PLC_ID", None)
+        try:
+            fallback_plc_id = int(fallback_plc_id)
+        except (TypeError, ValueError):
+            fallback_plc_id = None
+        if fallback_plc_id is not None and fallback_plc_id > 0:
+            plc_ids = [fallback_plc_id]
+
+    for plc_id in plc_ids:
+        _process_command_for_plc(plc_id)
