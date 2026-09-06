@@ -1,62 +1,115 @@
 import requests
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 
+from store_forward import (
+    delete_acked,
+    enqueue_many,
+    get_batch,
+    increment_retries,
+    init_queue,
+    pending_count,
+    rows_to_payload,
+)
+
 
 # =====================================================
-# SEND ONE TAG
+# STORE & FORWARD CONFIG
 # =====================================================
 
-def send_tag(plc_id, tag, value, communication_timeout=None):
+BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
+SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
 
-    payload = {
-        "PLC_ID": plc_id,
-        "TagName": tag,
-        "Value": value,
-        "Timestamp": datetime.now().isoformat()
-    }
+
+# =====================================================
+# SERVER SEND
+# =====================================================
+
+def _send_batch(rows):
+    if not rows:
+        return False
 
     url = (
         config.SERVER_URL.rstrip("/")
-        + "/api/data"
+        + "/api/store_forward"
     )
 
+    payload = {
+        "items": rows_to_payload(rows)
+    }
+
     try:
-
-        request_kwargs = {
-            "json": payload
-        }
-
-        # The timeout is part of the PLCReader Flow configuration.
-        # When it is blank in Flow, no client-side timeout is imposed here.
-        if communication_timeout not in (None, ""):
-            request_kwargs["timeout"] = float(communication_timeout)
-
         response = requests.post(
             url,
-            **request_kwargs
+            json=payload,
+            timeout=SEND_TIMEOUT,
         )
 
         if response.status_code != 200:
-
             print(
-                "SERVER ERROR:",
+                "STORE & FORWARD SERVER ERROR:",
                 response.status_code,
                 response.text
             )
+            return False
 
-        return response.status_code
+        result = response.json()
+        if result.get("status") != "ok":
+            print(
+                "STORE & FORWARD REJECTED:",
+                result
+            )
+            return False
 
-    except Exception as e:
+        acks = result.get("acks", [])
+        if not isinstance(acks, list):
+            return False
+
+        delete_acked(acks)
+
+        errors = result.get("errors") or []
+        if errors:
+            increment_retries([
+                item.get("EventID")
+                for item in errors
+                if isinstance(item, dict)
+            ])
 
         print(
-            "SERVER CONNECTION ERROR:",
-            e
+            "STORE & FORWARD ACK:",
+            len(acks),
+            "PENDING:",
+            pending_count()
         )
 
-        return None
+        return True
+
+    except Exception as exc:
+        print(
+            "STORE & FORWARD CONNECTION ERROR:",
+            exc
+        )
+        return False
+
+
+# =====================================================
+# FLUSH LOCAL QUEUE
+# =====================================================
+
+def flush_queue():
+    """Send oldest queued records first; delete only after server ACK."""
+    while True:
+        rows = get_batch(BATCH_SIZE)
+        if not rows:
+            return True
+
+        if not _send_batch(rows):
+            increment_retries([
+                row["EventID"]
+                for row in rows
+            ])
+            return False
 
 
 # =====================================================
@@ -64,103 +117,58 @@ def send_tag(plc_id, tag, value, communication_timeout=None):
 # =====================================================
 
 def send_all(data):
+    init_queue()
 
     if not data:
+        flush_queue()
         return
 
-    # New multi-PLC format from plc.read_all():
-    # [
-    #   {
-    #       "PLC_ID": 1,
-    #       "TagName": "voltage",
-    #       "Value": 220,
-    #       "CommunicationTimeout": 10
-    #   }
-    # ]
-    if isinstance(data, list):
+    items = []
 
-        items = []
+    # New multi-PLC format from plc_parallel.read_all().
+    if isinstance(data, list):
         for item in data:
             if not isinstance(item, dict):
                 continue
 
             plc_id = item.get("PLC_ID")
             tag = item.get("TagName")
-            value = item.get("Value")
-            communication_timeout = item.get("CommunicationTimeout")
-
             if plc_id is None or tag is None:
                 continue
 
-            items.append((
-                plc_id,
-                tag,
-                value,
-                communication_timeout,
-            ))
+            items.append({
+                "PLC_ID": plc_id,
+                "TagName": tag,
+                "Value": item.get("Value"),
+                "Timestamp": datetime.now().isoformat(),
+                "CommunicationTimeout": item.get("CommunicationTimeout"),
+            })
 
-        if not items:
+    # Backward compatibility with the old dictionary format.
+    elif isinstance(data, dict):
+        for tag, value in data.items():
+            items.append({
+                "PLC_ID": config.PLC_ID,
+                "TagName": tag,
+                "Value": value,
+                "Timestamp": datetime.now().isoformat(),
+            })
+
+    if items:
+        try:
+            added = enqueue_many(items)
+            print(
+                "STORE & FORWARD QUEUED:",
+                added,
+                "PENDING:",
+                pending_count()
+            )
+        except Exception as exc:
+            print(
+                "STORE & FORWARD LOCAL QUEUE ERROR:",
+                exc
+            )
             return
 
-        # Each HTTP POST is independent. Sending them concurrently prevents
-        # one PLC or one slow request from delaying every other PLC.
-        max_workers = max(1, min(len(items), 32))
-
-        with ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="SCADA_EDGE_SEND"
-        ) as executor:
-            futures = {
-                executor.submit(
-                    send_tag,
-                    plc_id,
-                    tag,
-                    value,
-                    communication_timeout,
-                ): (plc_id, tag, value)
-                for plc_id, tag, value, communication_timeout in items
-            }
-
-            for future in as_completed(futures):
-                plc_id, tag, value = futures[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    result = None
-                    print(
-                        "SEND TASK ERROR:",
-                        "PLC_ID:", plc_id,
-                        tag,
-                        exc
-                    )
-
-                print(
-                    "SENT:",
-                    "PLC_ID:", plc_id,
-                    tag,
-                    value,
-                    result
-                )
-
-        return
-
-    # -----------------------------------------------------
-    # Backward compatibility with the old dictionary format.
-    # -----------------------------------------------------
-    if isinstance(data, dict):
-
-        for tag, value in data.items():
-
-            result = send_tag(
-                config.PLC_ID,
-                tag,
-                value
-            )
-
-            print(
-                "SENT:",
-                "PLC_ID:", config.PLC_ID,
-                tag,
-                value,
-                result
-            )
+    # This also attempts delivery when the server was previously offline.
+    flush_queue()
