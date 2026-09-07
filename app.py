@@ -4,6 +4,7 @@ from flask_cors import CORS
 from plc_parallel import read_all
 from sender import send_all
 from write_commands import process_one_write_command
+from store_forward import init_queue, pending_count
 
 import threading
 import time
@@ -73,7 +74,19 @@ def plc_loop():
 @app.route("/")
 def home():
 
-    return "SCADA FLOW EDGE ONLINE"
+    try:
+        init_queue()
+        pending = pending_count()
+        return (
+            "LOCAL DATABASE: ONLINE<br>"
+            "Database: store_forward.db<br>"
+            f"Pending Records: {pending}"
+        )
+    except Exception as e:
+        return (
+            "LOCAL DATABASE: ERROR<br>"
+            f"{e}"
+        ), 500
 
 
 # ======================================
