@@ -226,7 +226,7 @@ def process_pulses():
                 "REGISTER:", pulse["register"],
                 "BANDWIDTH:", pulse["bandwidth"],
                 "PULSE_WIDTH_MS:", int(pulse["pulse_width"] * 1000),
-                "INTERVAL_MS:": int(pulse["interval"] * 1000),
+                "INTERVAL_MS:", int(pulse["interval"] * 1000),
             )
 
         if state["is_on"] and now >= state["off_at"]:
