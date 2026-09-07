@@ -85,7 +85,10 @@ def _extract_pulses(flow):
             continue
 
         if bandwidth < 0 or bandwidth > 65535:
-            print("PULSE CONFIG ERROR: bandwidth must be between 0 and 65535", node_id)
+            print(
+                "PULSE CONFIG ERROR: bandwidth must be between 0 and 65535",
+                node_id,
+            )
             continue
 
         if interval_ms <= pulse_width_ms:
