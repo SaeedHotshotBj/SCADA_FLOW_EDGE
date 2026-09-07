@@ -4,6 +4,7 @@ from flask_cors import CORS
 from plc_parallel import read_all
 from sender import send_all
 from write_commands import process_one_write_command
+from pulse import process_pulses
 from store_forward import init_queue, pending_count, _db_path
 
 import html
@@ -45,6 +46,10 @@ def plc_loop():
             # Master PLC writes are handled through the same outbound
             # Edge -> VPS connection used by the normal data pipeline.
             process_one_write_command()
+
+            # Pulse nodes are executed locally on Edge so pulse timing does
+            # not depend on the Master write queue or network round trips.
+            process_pulses()
 
             data = read_all()
 
@@ -94,7 +99,7 @@ def _local_database_html():
 
         for table_row in tables:
             table_name = table_row["name"]
-            safe_table = '"' + table_name.replace('"', '""') + '"'
+            safe_table = '\"' + table_name.replace('\"', '\"\"') + '\"'
 
             columns = conn.execute(
                 f"PRAGMA table_info({safe_table})"
