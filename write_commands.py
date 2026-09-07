@@ -89,7 +89,10 @@ def _process_command_for_plc(plc_id):
     if payload.get("status") != "ok":
         return
 
-    command = payload.get("command") or {}
+    # No pending command is a normal condition, not an invalid command.
+    command = payload.get("command")
+    if not command:
+        return
 
     try:
         command_id = int(command["CommandID"])
