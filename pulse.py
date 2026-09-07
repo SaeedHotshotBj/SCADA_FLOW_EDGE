@@ -6,6 +6,7 @@ import plc
 # Pulse state is keyed by Drawflow node id so multiple Pulse nodes can
 # operate independently, including multiple pulses targeting the same PLC.
 _states = {}
+_last_flow_signature = None
 
 
 def _write_register(client, address, value, slave):
@@ -41,10 +42,16 @@ def _parse_positive_number(value, name, node_id):
 def _extract_pulses(flow):
     try:
         nodes = flow["drawflow"]["Home"]["data"]
-    except Exception:
+    except Exception as exc:
+        print("PULSE FLOW FORMAT ERROR:", exc)
+        return []
+
+    if not isinstance(nodes, dict):
+        print("PULSE FLOW FORMAT ERROR: Home.data is not an object")
         return []
 
     pulses = []
+    pulse_node_ids = []
 
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
@@ -54,9 +61,18 @@ def _extract_pulses(flow):
         if str(node_name).strip() != "Pulse":
             continue
 
+        pulse_node_ids.append(str(node_id))
         data = node.get("data", {})
         if not isinstance(data, dict):
             data = {}
+
+        # Allow the same values to be read from a nested config object too,
+        # while preserving the current Drawflow data format.
+        config = data.get("config")
+        if isinstance(config, dict):
+            merged = dict(config)
+            merged.update({key: value for key, value in data.items() if key != "config"})
+            data = merged
 
         try:
             plc_id = int(data.get("plc_id"))
@@ -73,7 +89,7 @@ def _extract_pulses(flow):
                 node_id,
             )
         except (TypeError, ValueError) as exc:
-            print("PULSE CONFIG ERROR:", exc)
+            print("PULSE CONFIG ERROR:", "NODE:", node_id, exc)
             continue
 
         if plc_id <= 0:
@@ -108,13 +124,25 @@ def _extract_pulses(flow):
             "interval": interval_ms / 1000.0,
         })
 
+    global _last_flow_signature
+    signature = tuple(pulse_node_ids)
+    if signature != _last_flow_signature:
+        _last_flow_signature = signature
+        print(
+            "PULSE NODES FOUND:",
+            list(signature),
+            "VALID:",
+            [pulse["node_id"] for pulse in pulses],
+        )
+
     return pulses
 
 
 def _get_plc_configs(flow):
     try:
         nodes = flow["drawflow"]["Home"]["data"]
-    except Exception:
+    except Exception as exc:
+        print("PULSE PLC CONFIG ERROR:", exc)
         return {}
 
     try:
