@@ -3,8 +3,6 @@ import time
 import plc
 
 
-# Pulse state is keyed by Drawflow node id so multiple Pulse nodes can
-# operate independently, including multiple pulses targeting the same PLC.
 _states = {}
 _last_flow_signature = None
 
@@ -32,11 +30,15 @@ def _parse_positive_number(value, name, node_id):
         parsed = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"Invalid {name} in Pulse node {node_id}")
-
     if parsed <= 0:
         raise ValueError(f"{name} must be greater than zero in Pulse node {node_id}")
-
     return parsed
+
+
+def _enabled(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 def _extract_pulses(flow):
@@ -45,29 +47,22 @@ def _extract_pulses(flow):
     except Exception as exc:
         print("PULSE FLOW FORMAT ERROR:", exc)
         return []
-
     if not isinstance(nodes, dict):
         print("PULSE FLOW FORMAT ERROR: Home.data is not an object")
         return []
 
     pulses = []
     pulse_node_ids = []
-
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
             continue
-
         node_name = node.get("class") or node.get("name")
         if str(node_name).strip() != "Pulse":
             continue
-
         pulse_node_ids.append(str(node_id))
         data = node.get("data", {})
         if not isinstance(data, dict):
             data = {}
-
-        # Allow the same values to be read from a nested config object too,
-        # while preserving the current Drawflow data format.
         config = data.get("config")
         if isinstance(config, dict):
             merged = dict(config)
@@ -78,16 +73,8 @@ def _extract_pulses(flow):
             plc_id = int(data.get("plc_id"))
             register = int(data.get("register"))
             bandwidth = int(data.get("bandwidth", 1))
-            pulse_width_ms = _parse_positive_number(
-                data.get("pulse_width"),
-                "pulse_width",
-                node_id,
-            )
-            interval_ms = _parse_positive_number(
-                data.get("interval"),
-                "interval",
-                node_id,
-            )
+            pulse_width_ms = _parse_positive_number(data.get("pulse_width"), "pulse_width", node_id)
+            interval_ms = _parse_positive_number(data.get("interval"), "interval", node_id)
         except (TypeError, ValueError) as exc:
             print("PULSE CONFIG ERROR:", "NODE:", node_id, exc)
             continue
@@ -95,24 +82,14 @@ def _extract_pulses(flow):
         if plc_id <= 0:
             print("PULSE CONFIG ERROR: invalid PLC_ID", node_id, plc_id)
             continue
-
         if register < 0 or register > 65535:
             print("PULSE CONFIG ERROR: invalid register", node_id, register)
             continue
-
         if bandwidth < 0 or bandwidth > 65535:
-            print(
-                "PULSE CONFIG ERROR: bandwidth must be between 0 and 65535",
-                node_id,
-            )
+            print("PULSE CONFIG ERROR: pulse ON value must be between 0 and 65535", node_id)
             continue
-
         if interval_ms <= pulse_width_ms:
-            print(
-                "PULSE CONFIG ERROR:",
-                "Interval must be greater than Pulse Width",
-                "NODE:", node_id,
-            )
+            print("PULSE CONFIG ERROR: Interval must be greater than Pulse Width", "NODE:", node_id)
             continue
 
         pulses.append({
@@ -122,30 +99,31 @@ def _extract_pulses(flow):
             "bandwidth": bandwidth,
             "pulse_width": pulse_width_ms / 1000.0,
             "interval": interval_ms / 1000.0,
+            "enabled": _enabled(data.get("enabled", True)),
         })
 
     global _last_flow_signature
-    signature = tuple(pulse_node_ids)
+    signature = tuple(
+        (
+            pulse_node_ids[i],
+            pulses[i]["plc_id"],
+            pulses[i]["register"],
+            pulses[i]["bandwidth"],
+            pulses[i]["pulse_width"],
+            pulses[i]["interval"],
+            pulses[i]["enabled"],
+        )
+        for i in range(min(len(pulse_node_ids), len(pulses)))
+    )
     if signature != _last_flow_signature:
         _last_flow_signature = signature
-        print(
-            "PULSE NODES FOUND:",
-            list(signature),
-            "VALID:",
-            [pulse["node_id"] for pulse in pulses],
-        )
-
+        print("PULSE NODES FOUND:", list(pulse_node_ids), "VALID:", [p["node_id"] for p in pulses])
     return pulses
 
 
 def _get_plc_configs(flow):
     try:
         nodes = flow["drawflow"]["Home"]["data"]
-    except Exception as exc:
-        print("PULSE PLC CONFIG ERROR:", exc)
-        return {}
-
-    try:
         return plc._extract_plc_configs(nodes)
     except Exception as exc:
         print("PULSE PLC CONFIG ERROR:", exc)
@@ -154,55 +132,30 @@ def _get_plc_configs(flow):
 
 def _state_signature(pulse):
     return (
-        pulse["plc_id"],
-        pulse["register"],
-        pulse["bandwidth"],
-        pulse["pulse_width"],
-        pulse["interval"],
+        pulse["plc_id"], pulse["register"], pulse["bandwidth"],
+        pulse["pulse_width"], pulse["interval"], pulse["enabled"],
     )
 
 
 def _force_off(state, plc_configs):
     if not state.get("is_on"):
         return
-
     plc_config = plc_configs.get(int(state["plc_id"]))
     if plc_config is None:
         return
-
     client = plc.get_client(plc_config)
     if client is None:
         return
-
     try:
-        _write_register(
-            client,
-            state["register"],
-            0,
-            plc_config["slave"],
-        )
+        _write_register(client, state["register"], 0, plc_config["slave"])
         state["is_on"] = False
-        print(
-            "PULSE FORCED OFF:",
-            "NODE:", state["node_id"],
-            "PLC_ID:", state["plc_id"],
-            "REGISTER:", state["register"],
-        )
+        print("PULSE FORCED OFF:", "NODE:", state["node_id"], "PLC_ID:", state["plc_id"], "REGISTER:", state["register"])
     except Exception as exc:
-        print(
-            "PULSE FORCE OFF ERROR:",
-            "NODE:", state["node_id"],
-            exc,
-        )
+        print("PULSE FORCE OFF ERROR:", "NODE:", state["node_id"], exc)
 
 
 def process_pulses():
-    """Run all Pulse nodes defined by the current Flow configuration.
-
-    Interval is the time from the start of one pulse to the start of the
-    next pulse. Pulse Width must therefore be smaller than Interval.
-    The ON value is the configured Bandwidth value; the OFF value is zero.
-    """
+    """Execute every enabled Pulse node in the company Flow on Edge."""
     flow = plc.get_flow_config()
     if not flow:
         return
@@ -210,10 +163,8 @@ def process_pulses():
     pulses = _extract_pulses(flow)
     plc_configs = _get_plc_configs(flow)
     now = time.monotonic()
-
     active_ids = {pulse["node_id"] for pulse in pulses}
 
-    # A removed or invalid Pulse node must not leave its PLC register ON.
     for node_id in list(_states):
         if node_id in active_ids:
             continue
@@ -224,22 +175,21 @@ def process_pulses():
     for pulse in pulses:
         node_id = pulse["node_id"]
         plc_config = plc_configs.get(pulse["plc_id"])
+        state = _states.get(node_id)
+        if not pulse["enabled"]:
+            if state is not None:
+                _force_off(state, plc_configs)
+                _states.pop(node_id, None)
+            continue
 
         if plc_config is None:
-            print(
-                "PULSE PLC NOT FOUND:",
-                "NODE:", node_id,
-                "PLC_ID:", pulse["plc_id"],
-            )
+            print("PULSE PLC NOT FOUND:", "NODE:", node_id, "PLC_ID:", pulse["plc_id"])
             continue
 
         signature = _state_signature(pulse)
-        state = _states.get(node_id)
-
         if state is None or state.get("signature") != signature:
             if state is not None:
                 _force_off(state, plc_configs)
-
             state = {
                 "node_id": node_id,
                 "plc_id": pulse["plc_id"],
@@ -250,66 +200,28 @@ def process_pulses():
                 "signature": signature,
             }
             _states[node_id] = state
-            print(
-                "PULSE CONFIG LOADED:",
-                "NODE:", node_id,
-                "PLC_ID:", pulse["plc_id"],
-                "REGISTER:", pulse["register"],
-                "BANDWIDTH:", pulse["bandwidth"],
-                "PULSE_WIDTH_MS:", int(pulse["pulse_width"] * 1000),
-                "INTERVAL_MS:", int(pulse["interval"] * 1000),
-            )
+            print("PULSE CONFIG LOADED:", "NODE:", node_id, "PLC_ID:", pulse["plc_id"], "REGISTER:", pulse["register"], "ON_VALUE:", pulse["bandwidth"], "PULSE_WIDTH_MS:", int(pulse["pulse_width"] * 1000), "INTERVAL_MS:", int(pulse["interval"] * 1000))
 
         if state["is_on"] and now >= state["off_at"]:
             client = plc.get_client(plc_config)
             if client is not None:
                 try:
-                    _write_register(
-                        client,
-                        pulse["register"],
-                        0,
-                        plc_config["slave"],
-                    )
+                    _write_register(client, pulse["register"], 0, plc_config["slave"])
                     state["is_on"] = False
-                    print(
-                        "PULSE OFF:",
-                        "NODE:", node_id,
-                        "PLC_ID:", pulse["plc_id"],
-                        "REGISTER:", pulse["register"],
-                    )
+                    print("PULSE OFF:", "NODE:", node_id, "PLC_ID:", pulse["plc_id"], "REGISTER:", pulse["register"])
                 except Exception as exc:
-                    print(
-                        "PULSE OFF ERROR:",
-                        "NODE:", node_id,
-                        exc,
-                    )
+                    print("PULSE OFF ERROR:", "NODE:", node_id, exc)
                     continue
 
         if not state["is_on"] and now >= state["next_start"]:
             client = plc.get_client(plc_config)
             if client is None:
                 continue
-
             try:
-                _write_register(
-                    client,
-                    pulse["register"],
-                    pulse["bandwidth"],
-                    plc_config["slave"],
-                )
+                _write_register(client, pulse["register"], pulse["bandwidth"], plc_config["slave"])
                 state["is_on"] = True
                 state["off_at"] = now + pulse["pulse_width"]
                 state["next_start"] = now + pulse["interval"]
-                print(
-                    "PULSE ON:",
-                    "NODE:", node_id,
-                    "PLC_ID:", pulse["plc_id"],
-                    "REGISTER:", pulse["register"],
-                    "VALUE:", pulse["bandwidth"],
-                )
+                print("PULSE ON:", "NODE:", node_id, "PLC_ID:", pulse["plc_id"], "REGISTER:", pulse["register"], "VALUE:", pulse["bandwidth"])
             except Exception as exc:
-                print(
-                    "PULSE ON ERROR:",
-                    "NODE:", node_id,
-                    exc,
-                )
+                print("PULSE ON ERROR:", "NODE:", node_id, exc)
