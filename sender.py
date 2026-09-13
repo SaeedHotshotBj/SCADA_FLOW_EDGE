@@ -70,11 +70,11 @@ def _send_batch(rows):
 
         errors = result.get("errors") or []
         if errors:
-            increment_retries([
-                item.get("EventID")
-                for item in errors
-                if isinstance(item, dict)
-            ])
+            # Keep failed events queued, but stop this flush cycle.
+            # flush_queue() increments retries once for the events that
+            # remain in the local queue instead of hot-looping the same
+            # application-level failures.
+            return False
 
         print(
             "STORE & FORWARD ACK:",
