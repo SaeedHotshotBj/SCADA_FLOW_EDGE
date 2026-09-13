@@ -35,15 +35,41 @@ def _send_batch(rows):
         + "/api/store_forward"
     )
 
+    payload_rows = rows_to_payload(rows)
     payload = {
-        "items": rows_to_payload(rows)
+        "items": payload_rows
     }
+
+    print(
+        "STORE & FORWARD SEND:",
+        "COUNT=",
+        len(payload_rows),
+        "ITEMS=",
+        [
+            {
+                "EventID": item.get("EventID"),
+                "PLC_ID": item.get("PLC_ID"),
+                "TagName": item.get("TagName"),
+                "Value": item.get("Value"),
+            }
+            for item in payload_rows
+            if isinstance(item, dict)
+        ]
+    )
 
     try:
         response = requests.post(
             url,
             json=payload,
             timeout=SEND_TIMEOUT,
+        )
+
+        print(
+            "STORE & FORWARD SERVER RESPONSE:",
+            "STATUS=",
+            response.status_code,
+            "BODY=",
+            response.text
         )
 
         if response.status_code != 200:
@@ -55,6 +81,16 @@ def _send_batch(rows):
             return False
 
         result = response.json()
+        print(
+            "STORE & FORWARD RESULT:",
+            "STATUS=",
+            result.get("status"),
+            "ACKS=",
+            result.get("acks"),
+            "ERRORS=",
+            result.get("errors")
+        )
+
         if result.get("status") != "ok":
             print(
                 "STORE & FORWARD REJECTED:",
@@ -64,12 +100,20 @@ def _send_batch(rows):
 
         acks = result.get("acks", [])
         if not isinstance(acks, list):
+            print(
+                "STORE & FORWARD INVALID ACKS:",
+                repr(acks)
+            )
             return False
 
         delete_acked(acks)
 
         errors = result.get("errors") or []
         if errors:
+            print(
+                "STORE & FORWARD ITEM ERRORS:",
+                errors
+            )
             increment_retries([
                 item.get("EventID")
                 for item in errors
@@ -79,6 +123,8 @@ def _send_batch(rows):
         print(
             "STORE & FORWARD ACK:",
             len(acks),
+            "ERRORS:",
+            len(errors),
             "PENDING:",
             pending_count()
         )
