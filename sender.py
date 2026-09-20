@@ -20,6 +20,8 @@ from store_forward import (
 
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
+FLUSH_INTERVAL = max(0.1, float(getattr(config, "STORE_FORWARD_FLUSH_INTERVAL", 0.5)))
+_last_flush_time = 0.0
 
 
 # =====================================================
@@ -99,9 +101,13 @@ def _send_batch(rows):
 
 def flush_queue():
     """Send oldest queued records first; delete only after server ACK."""
+    global _last_flush_time
+    sent_any = False
     while True:
         rows = get_batch(BATCH_SIZE)
         if not rows:
+            if sent_any:
+                _last_flush_time = __import__("time").time()
             return True
 
         if not _send_batch(rows):
@@ -110,6 +116,7 @@ def flush_queue():
                 for row in rows
             ])
             return False
+        sent_any = True
 
 
 # =====================================================
@@ -170,5 +177,12 @@ def send_all(data):
             )
             return
 
-    # This also attempts delivery when the server was previously offline.
-    flush_queue()
+    # Batch healthy-network traffic without delaying delivery for too long.
+    global _last_flush_time
+    now = __import__("time").time()
+    should_flush = (
+        pending_count() >= BATCH_SIZE
+        or now - _last_flush_time >= FLUSH_INTERVAL
+    )
+    if should_flush:
+        flush_queue()
