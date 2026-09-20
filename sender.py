@@ -115,6 +115,7 @@ def flush_queue():
                 row["EventID"]
                 for row in rows
             ])
+            _last_flush_time = time.time()
             return False
         sent_any = True
 
