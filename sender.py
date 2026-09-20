@@ -127,7 +127,13 @@ def send_all(data):
     init_queue()
 
     if not data:
-        flush_queue()
+        now = time.time()
+        pending = pending_count()
+        if pending and (
+            pending >= BATCH_SIZE
+            or now - _last_flush_time >= FLUSH_INTERVAL
+        ):
+            flush_queue()
         return
 
     items = []
