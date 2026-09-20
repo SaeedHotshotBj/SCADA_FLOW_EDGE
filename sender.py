@@ -1,5 +1,7 @@
-import requests
+import time
 from datetime import datetime
+
+import requests
 
 import config
 
@@ -71,12 +73,6 @@ def _send_batch(rows):
         delete_acked(acks)
 
         errors = result.get("errors") or []
-        if errors:
-            increment_retries([
-                item.get("EventID")
-                for item in errors
-                if isinstance(item, dict)
-            ])
 
         print(
             "STORE & FORWARD ACK:",
@@ -111,7 +107,7 @@ def flush_queue():
         rows = get_batch(BATCH_SIZE)
         if not rows:
             if sent_any:
-                _last_flush_time = __import__("time").time()
+                _last_flush_time = time.time()
             return True
 
         if not _send_batch(rows):
@@ -183,7 +179,7 @@ def send_all(data):
 
     # Batch healthy-network traffic without delaying delivery for too long.
     global _last_flush_time
-    now = __import__("time").time()
+    now = time.time()
     should_flush = (
         pending_count() >= BATCH_SIZE
         or now - _last_flush_time >= FLUSH_INTERVAL
