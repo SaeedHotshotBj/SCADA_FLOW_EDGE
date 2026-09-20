@@ -56,10 +56,10 @@ def _read_one_plc(plc_config, plc_mappings, now):
     # --------------------------------------------------------
     # TRIGGER STORAGE
     #
-    # The trigger signal itself is persisted on every scan.  This is
-    # intentional: the server needs the complete 0/1 transition sequence
-    # to implement reliable Rise/Fall state tracking, even after an
-    # internet outage when Store & Forward replays the samples in order.
+    # Keep each trigger-register scan as a complete ordered group:
+    # dependent TRIGGER samples first, then the synthetic signal marker.
+    # This preserves the correct production snapshot when several Store &
+    # Forward scans are replayed in one HTTP batch.
     # --------------------------------------------------------
     trigger_mappings = [
         mapping
@@ -78,13 +78,6 @@ def _read_one_plc(plc_config, plc_mappings, now):
         if trigger_value is None:
             continue
 
-        data.append({
-            "PLC_ID": plc_id,
-            "TagName": f"{TRIGGER_SIGNAL_PREFIX}{trigger_register}",
-            "Value": trigger_value,
-            "CommunicationTimeout": communication_timeout,
-        })
-
         dependent = [
             mapping
             for mapping in trigger_mappings
@@ -92,8 +85,9 @@ def _read_one_plc(plc_config, plc_mappings, now):
         ]
 
         # Dependent TRIGGER tags are sampled while the configured trigger is
-        # active.  They therefore form the historian trace for the whole
-        # production cycle rather than a single trigger snapshot.
+        # active. They are intentionally queued before the synthetic signal
+        # marker, so the server can reconstruct an exact snapshot for this
+        # scan using the durable queue order.
         for mapping in dependent:
             expected = mapping.get("trigger_value", 0)
             try:
@@ -129,6 +123,13 @@ def _read_one_plc(plc_config, plc_mappings, now):
                 "TRIGGER REGISTER:", trigger_register,
                 "TRIGGER VALUE:", expected,
             )
+
+        data.append({
+            "PLC_ID": plc_id,
+            "TagName": f"{TRIGGER_SIGNAL_PREFIX}{trigger_register}",
+            "Value": trigger_value,
+            "CommunicationTimeout": communication_timeout,
+        })
 
     return data
 
