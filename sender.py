@@ -81,11 +81,15 @@ def _send_batch(rows):
         print(
             "STORE & FORWARD ACK:",
             len(acks),
+            "ERRORS:",
+            len(errors),
             "PENDING:",
             pending_count()
         )
 
-        return True
+        # HTTP 200 only means the batch was processed. Rejected items remain
+        # queued and must not be retried in a tight loop during this flush.
+        return not bool(errors)
 
     except Exception as exc:
         print(
