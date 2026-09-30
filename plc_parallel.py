@@ -82,6 +82,7 @@ def _read_one_plc(plc_config, plc_mappings, now):
             "PLC_ID": plc_id,
             "TagName": f"{TRIGGER_SIGNAL_PREFIX}{trigger_register}",
             "Value": trigger_value,
+            "StorageType": "TRIGGER_SIGNAL",
             "CommunicationTimeout": communication_timeout,
         })
 
@@ -120,6 +121,7 @@ def _read_one_plc(plc_config, plc_mappings, now):
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
+                "StorageType": "LIVE",
                 "CommunicationTimeout": communication_timeout,
             })
 
