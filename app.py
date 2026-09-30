@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from plc_parallel import read_all
+from edge_calculator import calculate
 from sender import send_all
 from write_commands import process_one_write_command
 from pulse import process_pulses
@@ -52,15 +53,11 @@ def plc_loop():
             process_pulses()
 
             data = read_all()
+            calculated = calculate(data)
 
-            if data:
+            send_all(data, calculated)
 
-                send_all(data)
 
-            else:
-
-                # No tag is due at this moment.
-                pass
 
         except Exception as e:
 
