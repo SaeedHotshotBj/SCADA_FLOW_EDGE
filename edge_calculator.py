@@ -47,7 +47,7 @@ def _plc_reader_ids(nodes):
     result = {}
     fallback = int(getattr(config, "PLC_ID", 1))
     for node_id, node in nodes.items():
-        if node.get("name", node.get("class")) != "PLCReader":
+        if (node.get("name") or node.get("class")) != "PLCReader":
             continue
         raw = (node.get("data", {}) or {}).get("plc_id", (node.get("data", {}) or {}).get("PLC_ID"))
         try:
