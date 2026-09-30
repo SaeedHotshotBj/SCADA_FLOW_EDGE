@@ -264,6 +264,7 @@ def rows_to_payload(rows):
             "TagName": row["TagName"],
             "Value": row["Value"],
             "Timestamp": row["Timestamp"],
+            "StorageType": row["StorageType"],
         }
         for row in rows
     ]
