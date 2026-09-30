@@ -229,16 +229,21 @@ def calculate(data):
 
     results = []
     plan = _expression_plan(flow)
+    scopes = {}
+
     for item in plan:
         for plc_id in item["plc_ids"]:
-            scope = _math_scope()
-            tags_for_plc = {
-                tag: value
-                for (pid, tag), value in _latest_tags.items()
-                if pid == plc_id
-            }
+            if plc_id not in scopes:
+                scope = _math_scope()
+                scope.update({
+                    tag: value
+                    for (pid, tag), value in _latest_tags.items()
+                    if pid == plc_id
+                })
+                scopes[plc_id] = scope
 
-            scope.update(tags_for_plc)
+            scope = scopes[plc_id]
+
             try:
                 value = eval(
                     item["expression"],
@@ -258,6 +263,10 @@ def calculate(data):
 
             if not math.isfinite(value):
                 continue
+
+            # Calculated results become variables for the next expression
+            # in the same PLC scope, preserving Flow-driven formula chains.
+            scope[item["name"]] = value
 
             results.append({
                 "PLC_ID": plc_id,
