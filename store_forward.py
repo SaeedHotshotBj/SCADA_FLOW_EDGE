@@ -53,11 +53,19 @@ def init_queue():
                     Value REAL,
                     Timestamp TEXT NOT NULL,
                     CommunicationTimeout REAL,
+                    StorageType TEXT,
                     RetryCount INTEGER NOT NULL DEFAULT 0,
                     CreatedAt TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(StoreForwardQueue)").fetchall()
+            }
+            if "StorageType" not in columns:
+                conn.execute("ALTER TABLE StoreForwardQueue ADD COLUMN StorageType TEXT")
+
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_store_forward_queue_id
@@ -69,8 +77,11 @@ def init_queue():
             conn.close()
 
 
-def enqueue(plc_id, tag, value, timestamp, communication_timeout=None):
-    event_id = uuid.uuid4().hex
+def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_type=None, event_id=None):
+    storage_type = str(storage_type or "").strip().upper() or None
+    if storage_type in {"LIVE", "TIME"}:
+        raise ValueError("LIVE/TIME data must never enter Store & Forward")
+    event_id = str(event_id or uuid.uuid4().hex)
 
     with _LOCK:
         conn = _connect()
@@ -84,9 +95,10 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None):
                     TagName,
                     Value,
                     Timestamp,
-                    CommunicationTimeout
+                    CommunicationTimeout,
+                    StorageType
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -95,6 +107,7 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None):
                     value,
                     str(timestamp),
                     communication_timeout,
+                    storage_type,
                 ),
             )
             conn.commit()
@@ -118,14 +131,19 @@ def enqueue_many(items):
         if plc_id is None or tag is None:
             continue
 
+        storage_type = str(item.get("StorageType", "") or "").strip().upper() or None
+        if storage_type in {"LIVE", "TIME"}:
+            continue
+
         rows.append(
             (
-                uuid.uuid4().hex,
+                str(item.get("EventID") or uuid.uuid4().hex),
                 int(plc_id),
                 str(tag),
                 item.get("Value"),
                 str(item.get("Timestamp")),
                 item.get("CommunicationTimeout"),
+                storage_type,
             )
         )
 
@@ -137,16 +155,17 @@ def enqueue_many(items):
         try:
             conn.executemany(
                 """
-                INSERT INTO StoreForwardQueue
+                INSERT OR IGNORE INTO StoreForwardQueue
                 (
                     EventID,
                     PLC_ID,
                     TagName,
                     Value,
                     Timestamp,
-                    CommunicationTimeout
+                    CommunicationTimeout,
+                    StorageType
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -170,7 +189,8 @@ def get_batch(limit=100):
                     TagName,
                     Value,
                     Timestamp,
-                    CommunicationTimeout
+                    CommunicationTimeout,
+                    StorageType
                 FROM StoreForwardQueue
                 ORDER BY ID ASC
                 LIMIT ?
