@@ -62,7 +62,7 @@ def _plc_reader_ids(nodes):
 def _tagmapper_plcs(nodes, reader_ids):
     result = {}
     for node_id, node in nodes.items():
-        if node.get("name", node.get("class")) != "TagMapper":
+        if (node.get("name") or node.get("class")) != "TagMapper":
             continue
         data = _config(node)
         mappings = data.get("mappings", [])
@@ -107,7 +107,7 @@ def _expression_plan(flow):
     plan = []
 
     for node_id, node in nodes.items():
-        if node.get("name") != "ExpressionNode":
+        if (node.get("name") or node.get("class")) != "ExpressionNode":
             continue
 
         cfg = _config(node)
