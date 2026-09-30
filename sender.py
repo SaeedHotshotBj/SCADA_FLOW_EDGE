@@ -9,8 +9,10 @@ from edge_calculated_db import (
     aggregate_storage_type,
     mark_queued,
     pending_aggregates,
+    record_live_values,
     record_samples,
     rollup_completed,
+    cleanup,
 )
 from store_forward import (
     delete_acked,
@@ -195,6 +197,15 @@ def send_all(data, calculated=None):
             historical_items.append(outgoing)
 
     calculated = calculated or []
+
+    # Raw TIME/LIVE values are aggregated locally in memory. Their samples
+    # never enter the local or server historian.
+    if live_items:
+        try:
+            record_live_values(live_items)
+        except Exception as exc:
+            print("EDGE LIVE AGGREGATION ERROR:", exc)
+
     if calculated:
         try:
             record_samples(calculated)
@@ -218,10 +229,8 @@ def send_all(data, calculated=None):
                 }
             )
 
-    cleanup_needed = bool(calculated)
-    if cleanup_needed:
+    if live_items or calculated:
         try:
-            from edge_calculated_db import cleanup
             cleanup()
         except Exception as exc:
             print("EDGE CALCULATED DB CLEANUP ERROR:", exc)
