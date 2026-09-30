@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -72,6 +73,132 @@ def _bucket_end(start, resolution):
     if resolution == "hour":
         return start + timedelta(hours=1)
     return start + timedelta(days=1)
+
+
+
+_LIVE_LOCK = threading.RLock()
+_LIVE_BUCKETS = {}
+
+
+def _new_bucket(start):
+    return {
+        "start": start,
+        "sum": 0.0,
+        "count": 0,
+        "min": None,
+        "max": None,
+    }
+
+
+def _update_bucket(bucket, value):
+    bucket["sum"] += float(value)
+    bucket["count"] += 1
+    bucket["min"] = (
+        float(value)
+        if bucket["min"] is None
+        else min(bucket["min"], float(value))
+    )
+    bucket["max"] = (
+        float(value)
+        if bucket["max"] is None
+        else max(bucket["max"], float(value))
+    )
+
+
+def _write_live_aggregate(conn, plc_id, tag_name, resolution, bucket):
+    if bucket["count"] <= 0:
+        return
+    start = bucket["start"]
+    end = _bucket_end(start, resolution)
+    conn.execute(
+        """
+        INSERT INTO CalculatedAggregates
+        (PLC_ID,TagName,Resolution,PeriodStart,PeriodEnd,
+         AverageValue,MinValue,MaxValue,SampleCount,Queued)
+        VALUES (?,?,?,?,?,?,?,?,?,0)
+        ON CONFLICT(PLC_ID,TagName,Resolution,PeriodStart)
+        DO UPDATE SET
+            PeriodEnd=excluded.PeriodEnd,
+            AverageValue=excluded.AverageValue,
+            MinValue=excluded.MinValue,
+            MaxValue=excluded.MaxValue,
+            SampleCount=excluded.SampleCount
+        """,
+        (
+            int(plc_id),
+            str(tag_name),
+            resolution,
+            _ts(start),
+            _ts(end),
+            bucket["sum"] / bucket["count"],
+            bucket["min"],
+            bucket["max"],
+            bucket["count"],
+        ),
+    )
+
+
+def record_live_values(items):
+    """Aggregate raw TIME values in memory and persist only completed averages."""
+    if not items:
+        return 0
+    init_calculated_db()
+    flushed = []
+
+    with _LIVE_LOCK:
+        conn = _connect()
+        try:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                storage = str(item.get("StorageType", "")).strip().upper()
+                if storage not in {"LIVE", "TIME"}:
+                    continue
+                try:
+                    plc_id = int(item["PLC_ID"])
+                    tag = str(item["TagName"]).strip()
+                    value = float(item["Value"])
+                    timestamp = _parse_ts(item.get("Timestamp"))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not tag or timestamp is None:
+                    continue
+
+                state = _LIVE_BUCKETS.setdefault(
+                    (plc_id, tag.lower()),
+                    {
+                        "tag": tag,
+                        "minute": None,
+                        "hour": None,
+                        "day": None,
+                    },
+                )
+
+                for resolution in ("minute", "hour", "day"):
+                    bucket_start = _bucket_start(timestamp, resolution)
+                    bucket = state[resolution]
+
+                    if bucket is None:
+                        state[resolution] = _new_bucket(bucket_start)
+                    elif bucket_start > bucket["start"]:
+                        _write_live_aggregate(
+                            conn,
+                            plc_id,
+                            state["tag"],
+                            resolution,
+                            bucket,
+                        )
+                        flushed.append(
+                            (plc_id, state["tag"], resolution, bucket["start"])
+                        )
+                        state[resolution] = _new_bucket(bucket_start)
+
+                    _update_bucket(state[resolution], value)
+
+            conn.commit()
+            return len(flushed)
+        finally:
+            conn.close()
 
 
 def init_calculated_db():
