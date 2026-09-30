@@ -18,7 +18,6 @@ from store_forward import (
     get_batch,
     increment_retries,
     init_queue,
-    get_batch,
     pending_count,
     rows_to_payload,
 )
