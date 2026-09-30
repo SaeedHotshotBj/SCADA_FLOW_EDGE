@@ -121,7 +121,7 @@ def _read_one_plc(plc_config, plc_mappings, now):
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
-                "StorageType": "LIVE",
+                "StorageType": "TRIGGER",
                 "CommunicationTimeout": communication_timeout,
             })
 
