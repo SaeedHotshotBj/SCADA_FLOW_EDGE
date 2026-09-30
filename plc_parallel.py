@@ -22,7 +22,7 @@ def _read_one_plc(plc_config, plc_mappings, now):
     # TIME STORAGE
     # --------------------------------------------------------
     for mapping in plc_mappings:
-        if mapping["storage"] != "TIME":
+        if mapping["storage"] not in {"TIME", "LIVE"}:
             continue
         if not _plc.tag_is_due(mapping, now):
             continue
@@ -45,12 +45,18 @@ def _read_one_plc(plc_config, plc_mappings, now):
             "PLC_ID": plc_id,
             "TagName": name,
             "Value": value,
+            "StorageType": mapping["storage"],
             "CommunicationTimeout": communication_timeout,
         })
 
         print(
             "DUE:", "PLC_ID:", plc_id, name, value,
-            "REGISTER:", register, "INTERVAL:", mapping["interval"]
+            "REGISTER:", register,
+            "STORAGE:", mapping["storage"],
+            "INTERVAL:", mapping.get(
+                "live_interval" if mapping["storage"] == "LIVE" else "interval",
+                1,
+            )
         )
 
     # --------------------------------------------------------
