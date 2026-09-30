@@ -152,7 +152,7 @@ def record_live_values(items):
                 if not isinstance(item, dict):
                     continue
                 storage = str(item.get("StorageType", "")).strip().upper()
-                if storage not in {"LIVE", "TIME"}:
+                if storage != "TIME":
                     continue
                 try:
                     plc_id = int(item["PLC_ID"])
