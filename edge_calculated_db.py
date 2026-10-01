@@ -64,7 +64,11 @@ def _bucket_start(dt, resolution):
         return dt.replace(second=0, microsecond=0)
     if resolution == "hour":
         return dt.replace(minute=0, second=0, microsecond=0)
-    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if resolution == "day":
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if resolution == "month":
+        return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    raise ValueError("Unsupported aggregation resolution: %s" % resolution)
 
 
 def _bucket_end(start, resolution):
@@ -72,7 +76,46 @@ def _bucket_end(start, resolution):
         return start + timedelta(minutes=1)
     if resolution == "hour":
         return start + timedelta(hours=1)
-    return start + timedelta(days=1)
+    if resolution == "day":
+        return start + timedelta(days=1)
+    if resolution == "month":
+        if start.month == 12:
+            return start.replace(year=start.year + 1, month=1, day=1)
+        return start.replace(month=start.month + 1, day=1)
+    raise ValueError("Unsupported aggregation resolution: %s" % resolution)
+
+
+def _requested_resolutions(item):
+    """Return only the Edge-side resolutions selected by the Flow mapping.
+
+    Empty/missing values preserve the legacy behavior (minute/hour/day).
+    NONE means the TIME tag is live-only. A specific resolution means only
+    that completed aggregate is persisted and later sent to the server.
+    """
+    raw = str(
+        item.get(
+            "HistoryResolution",
+            item.get("history_resolution", "ALL"),
+        )
+        or "ALL"
+    ).strip().upper()
+
+    if raw in {"", "ALL"}:
+        return ("minute", "hour", "day")
+    if raw in {"NONE", "OFF"}:
+        return ()
+
+    resolution = raw.lower()
+    if resolution in {"minute", "hour", "day", "month"}:
+        return (resolution,)
+
+    print(
+        "EDGE INVALID HISTORY RESOLUTION:",
+        raw,
+        "PLC_ID:", item.get("PLC_ID"),
+        "Tag:", item.get("TagName"),
+    )
+    return ()
 
 
 
@@ -171,10 +214,11 @@ def record_live_values(items):
                         "minute": None,
                         "hour": None,
                         "day": None,
+                        "month": None,
                     },
                 )
 
-                for resolution in ("minute", "hour", "day"):
+                for resolution in _requested_resolutions(item):
                     bucket_start = _bucket_start(timestamp, resolution)
                     bucket = state[resolution]
 
@@ -468,6 +512,10 @@ def cleanup():
             "DELETE FROM CalculatedAggregates WHERE Resolution='day' AND PeriodStart < ?",
             (_ts(now - timedelta(days=DAY_RETENTION_DAYS)),),
         )
+        conn.execute(
+            "DELETE FROM CalculatedAggregates WHERE Resolution='month' AND PeriodStart < ?",
+            (_ts(now - timedelta(days=DAY_RETENTION_DAYS)),),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -478,6 +526,7 @@ def aggregate_storage_type(resolution):
         "minute": "CALCULATED_MINUTE",
         "hour": "CALCULATED_HOUR",
         "day": "CALCULATED_DAY",
+        "month": "CALCULATED_MONTH",
     }.get(str(resolution).lower())
 
 
