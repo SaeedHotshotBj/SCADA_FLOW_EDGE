@@ -46,6 +46,7 @@ def _read_one_plc(plc_config, plc_mappings, now):
             "TagName": name,
             "Value": value,
             "StorageType": mapping["storage"],
+            "HistoryResolution": mapping.get("history_resolution", "ALL"),
             "CommunicationTimeout": communication_timeout,
         })
 
