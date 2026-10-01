@@ -402,6 +402,12 @@ def get_runtime_configuration():
                     "datatype": datatype,
                     "scale": scale,
                     "storage": storage,
+                    "history_resolution": str(
+                        raw_mapping.get(
+                            "history_resolution",
+                            "ALL"
+                        ) or "ALL"
+                    ).strip().upper(),
                     "interval": interval,
                     "live_interval": live_interval,
                     "trigger_register": trigger_register,
@@ -536,6 +542,7 @@ def update_scheduler(mappings):
             mapping["datatype"],
             mapping["scale"],
             mapping["storage"],
+            mapping.get("history_resolution", "ALL"),
             mapping["trigger_register"],
             mapping["trigger_value"],
         )
