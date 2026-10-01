@@ -1,4 +1,4 @@
-"""Local Edge database for calculated samples and precomputed averages."""
+"""Local Edge database for calculated samples and time-weighted averages."""
 
 import os
 import sqlite3
@@ -126,30 +126,84 @@ _LIVE_BUCKETS = {}
 def _new_bucket(start):
     return {
         "start": start,
-        "sum": 0.0,
+        "weighted_sum": 0.0,
+        "weight_seconds": 0.0,
         "count": 0,
         "min": None,
         "max": None,
+        "last_timestamp": None,
+        "last_value": None,
+        "segment_start": start,
     }
 
 
-def _update_bucket(bucket, value):
-    bucket["sum"] += float(value)
+def _update_bucket(bucket, timestamp, value):
+    value = float(value)
+
     bucket["count"] += 1
     bucket["min"] = (
-        float(value)
+        value
         if bucket["min"] is None
-        else min(bucket["min"], float(value))
+        else min(bucket["min"], value)
     )
     bucket["max"] = (
-        float(value)
+        value
         if bucket["max"] is None
-        else max(bucket["max"], float(value))
+        else max(bucket["max"], value)
+    )
+
+    if bucket["last_timestamp"] is None:
+        # The first observed value represents the bucket from its start
+        # until the next observed sample.
+        bucket["last_timestamp"] = timestamp
+        bucket["last_value"] = value
+        bucket["segment_start"] = bucket["start"]
+        return
+
+    if timestamp < bucket["last_timestamp"]:
+        # Samples can arrive out of order across concurrent PLC workers.
+        # Keep the aggregate timing state monotonic while retaining the
+        # sample for min/max/count.
+        return
+
+    if timestamp == bucket["last_timestamp"]:
+        bucket["last_value"] = value
+        return
+
+    duration = (timestamp - bucket["segment_start"]).total_seconds()
+    if duration > 0:
+        bucket["weighted_sum"] += bucket["last_value"] * duration
+        bucket["weight_seconds"] += duration
+
+    bucket["segment_start"] = timestamp
+    bucket["last_timestamp"] = timestamp
+    bucket["last_value"] = value
+
+
+def _close_live_bucket(bucket, resolution):
+    if bucket["count"] <= 0 or bucket["last_value"] is None:
+        return None
+
+    end = _bucket_end(bucket["start"], resolution)
+    duration = (end - bucket["segment_start"]).total_seconds()
+    if duration > 0:
+        bucket["weighted_sum"] += bucket["last_value"] * duration
+        bucket["weight_seconds"] += duration
+
+    if bucket["weight_seconds"] <= 0:
+        return None
+
+    return (
+        bucket["weighted_sum"] / bucket["weight_seconds"],
+        bucket["min"],
+        bucket["max"],
+        bucket["count"],
     )
 
 
 def _write_live_aggregate(conn, plc_id, tag_name, resolution, bucket):
-    if bucket["count"] <= 0:
+    aggregate = _close_live_bucket(bucket, resolution)
+    if aggregate is None:
         return
     start = bucket["start"]
     end = _bucket_end(start, resolution)
@@ -173,10 +227,10 @@ def _write_live_aggregate(conn, plc_id, tag_name, resolution, bucket):
             resolution,
             _ts(start),
             _ts(end),
-            bucket["sum"] / bucket["count"],
-            bucket["min"],
-            bucket["max"],
-            bucket["count"],
+            aggregate[0],
+            aggregate[1],
+            aggregate[2],
+            aggregate[3],
         ),
     )
 
@@ -237,7 +291,11 @@ def record_live_values(items):
                         )
                         state[resolution] = _new_bucket(bucket_start)
 
-                    _update_bucket(state[resolution], value)
+                    _update_bucket(
+                        state[resolution],
+                        timestamp,
+                        value,
+                    )
 
             conn.commit()
             return len(flushed)
@@ -336,16 +394,42 @@ def _aggregate_bucket(conn, plc_id, tag_name, resolution, start, end):
     if not rows:
         return None
 
-    values = []
+    samples = []
     for row in rows:
         try:
-            values.append(float(row["Value"]))
+            timestamp = _parse_ts(row["Timestamp"])
+            value = float(row["Value"])
         except (TypeError, ValueError):
-            pass
-    if not values:
+            continue
+        if timestamp is None:
+            continue
+        samples.append((timestamp, value))
+
+    if not samples:
         return None
 
-    average = sum(values) / len(values)
+    weighted_sum = 0.0
+    weight_seconds = 0.0
+    values = []
+
+    for index, (timestamp, value) in enumerate(samples):
+        values.append(value)
+
+        segment_start = start if index == 0 else samples[index - 1][0]
+        segment_end = end if index == len(samples) - 1 else samples[index + 1][0]
+
+        segment_start = max(segment_start, start)
+        segment_end = min(segment_end, end)
+
+        duration = (segment_end - segment_start).total_seconds()
+        if duration > 0:
+            weighted_sum += value * duration
+            weight_seconds += duration
+
+    if weight_seconds <= 0:
+        return None
+
+    average = weighted_sum / weight_seconds
     return (
         average,
         min(values),
