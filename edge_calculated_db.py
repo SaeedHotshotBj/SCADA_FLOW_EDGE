@@ -415,7 +415,10 @@ def _aggregate_bucket(conn, plc_id, tag_name, resolution, start, end):
     for index, (timestamp, value) in enumerate(samples):
         values.append(value)
 
-        segment_start = start if index == 0 else samples[index - 1][0]
+        # Each sample represents the interval until the next sample.
+        # The first sample covers the bucket from its start; the last
+        # sample covers the remainder of the bucket.
+        segment_start = start if index == 0 else timestamp
         segment_end = end if index == len(samples) - 1 else samples[index + 1][0]
 
         segment_start = max(segment_start, start)
