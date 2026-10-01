@@ -188,6 +188,10 @@ def send_all(data, calculated=None):
             "Value": item.get("Value"),
             "Timestamp": item.get("Timestamp") or _timestamp(),
             "StorageType": storage,
+            "HistoryResolution": item.get(
+                "HistoryResolution",
+                item.get("history_resolution", "ALL"),
+            ),
             "CommunicationTimeout": item.get("CommunicationTimeout"),
         }
 
