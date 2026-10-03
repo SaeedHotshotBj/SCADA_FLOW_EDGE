@@ -69,6 +69,33 @@ jobs:
                   for item in closed_again
               ), closed_again
 
+              # The selected resolution is the minimum upload resolution:
+              # MINUTE uploads Minute + Hour + Day.
+              edge_data.record_time_sample(
+                  1, "Y", 0, "2026-10-03 23:59:50", "minute"
+              )
+              closed_upward_minute = edge_data.record_time_sample(
+                  1, "Y", 10, "2026-10-04 00:00:10", "minute"
+              )
+              assert {item["HistoryResolution"] for item in closed_upward_minute} == {
+                  "minute", "hour", "day"
+              }, closed_upward_minute
+              assert all(
+                  item["PeriodEnd"] <= "2026-10-04 00:00:10"
+                  for item in closed_upward_minute
+              ), closed_upward_minute
+
+              # HOUR uploads Hour + Day, but not Minute.
+              edge_data.record_time_sample(
+                  1, "Z", 0, "2026-10-03 23:59:50", "hour"
+              )
+              closed_upward_hour = edge_data.record_time_sample(
+                  1, "Z", 10, "2026-10-04 00:00:10", "hour"
+              )
+              assert {item["HistoryResolution"] for item in closed_upward_hour} == {
+                  "hour", "day"
+              }, closed_upward_hour
+
               conn.close()
               print("TIME WEIGHTED AGGREGATE TEST OK")
           finally:
