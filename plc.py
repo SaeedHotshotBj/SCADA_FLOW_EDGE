@@ -330,6 +330,16 @@ def get_runtime_configuration():
 
             datatype = str(raw_mapping.get("datatype", "INT")).upper()
             storage = str(raw_mapping.get("storage", "TIME")).upper()
+            if storage not in {"TIME", "LIVE", "TRIGGER"}:
+                print("INVALID TAG STORAGE:", raw_mapping)
+                continue
+
+            try:
+                live_interval = float(raw_mapping.get("live_interval", 1))
+            except Exception:
+                live_interval = 1.0
+            if live_interval <= 0:
+                live_interval = 1.0
 
             trigger_register = raw_mapping.get("trigger_register", 0)
             trigger_value = raw_mapping.get("trigger_value", 0)
@@ -392,7 +402,14 @@ def get_runtime_configuration():
                     "datatype": datatype,
                     "scale": scale,
                     "storage": storage,
+                    "history_resolution": str(
+                        raw_mapping.get(
+                            "history_resolution",
+                            "ALL"
+                        ) or "ALL"
+                    ).strip().upper(),
                     "interval": interval,
+                    "live_interval": live_interval,
                     "trigger_register": trigger_register,
                     "trigger_value": trigger_value,
                 })
@@ -521,9 +538,11 @@ def update_scheduler(mappings):
             mapping["name"],
             mapping["register"],
             mapping["interval"],
+            mapping.get("live_interval", 1),
             mapping["datatype"],
             mapping["scale"],
             mapping["storage"],
+            mapping.get("history_resolution", "ALL"),
             mapping["trigger_register"],
             mapping["trigger_value"],
         )
@@ -565,8 +584,10 @@ def tag_is_due(mapping, now):
 # ============================================================
 
 def schedule_next(mapping, now):
+    storage = str(mapping.get("storage", "TIME")).upper()
+    interval_key = "live_interval" if storage == "LIVE" else "interval"
     try:
-        interval = float(mapping.get("interval", 1))
+        interval = float(mapping.get(interval_key, 1))
     except Exception:
         interval = 1.0
 
@@ -638,7 +659,7 @@ def read_all():
         # TIME STORAGE
         # ----------------------------------------------------
         for mapping in plc_mappings:
-            if mapping["storage"] != "TIME":
+            if mapping["storage"] not in {"TIME", "LIVE"}:
                 continue
 
             if not tag_is_due(mapping, now):
@@ -673,6 +694,7 @@ def read_all():
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
+                "StorageType": mapping["storage"],
                 "CommunicationTimeout": communication_timeout,
             })
 
@@ -682,7 +704,14 @@ def read_all():
                 name,
                 value,
                 "REGISTER:", register,
-                "INTERVAL:", mapping["interval"]
+                "STORAGE:", mapping["storage"],
+                "INTERVAL:",
+                mapping.get(
+                    "live_interval"
+                    if mapping["storage"] == "LIVE"
+                    else "interval",
+                    1,
+                )
             )
 
         # ----------------------------------------------------

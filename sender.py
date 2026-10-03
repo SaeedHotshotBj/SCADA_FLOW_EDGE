@@ -1,8 +1,19 @@
+import hashlib
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import config
 
+from edge_calculated_db import (
+    aggregate_storage_type,
+    mark_queued,
+    pending_aggregates,
+    record_live_values,
+    record_samples,
+    rollup_completed,
+    cleanup,
+)
 from store_forward import (
     delete_acked,
     enqueue_many,
@@ -13,31 +24,104 @@ from store_forward import (
     rows_to_payload,
 )
 
-
-# =====================================================
-# STORE & FORWARD CONFIG
-# =====================================================
-
+TZ = ZoneInfo("Asia/Tehran")
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
 
 
-# =====================================================
-# SERVER SEND
-# =====================================================
+def _timestamp():
+    return datetime.now(TZ).replace(tzinfo=None).isoformat()
 
-def _send_batch(rows):
-    if not rows:
+
+def _send_live(items):
+    if not items:
+        return True
+
+    url = config.SERVER_URL.rstrip("/") + "/api/edge/live"
+    try:
+        response = requests.post(
+            url,
+            json={"items": items},
+            timeout=SEND_TIMEOUT,
+        )
+        if response.status_code != 200:
+            print("EDGE LIVE SERVER ERROR:", response.status_code, response.text)
+            return False
+
+        result = response.json()
+        if result.get("status") != "ok":
+            print("EDGE LIVE REJECTED:", result)
+            return False
+
+        return True
+    except Exception as exc:
+        print("EDGE LIVE CONNECTION ERROR:", exc)
         return False
 
-    url = (
-        config.SERVER_URL.rstrip("/")
-        + "/api/store_forward"
-    )
 
-    payload = {
-        "items": rows_to_payload(rows)
-    }
+def _aggregate_event_id(item):
+    raw = "|".join(
+        [
+            str(item.get("PLC_ID", "")),
+            str(item.get("TagName", "")),
+            str(item.get("Resolution", "")),
+            str(item.get("PeriodStart", "")),
+        ]
+    )
+    return "calc-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _queue_calculated_aggregates():
+    pending = pending_aggregates(BATCH_SIZE)
+    if not pending:
+        return 0
+
+    queue_items = []
+    ids = []
+    for item in pending:
+        resolution = str(item.get("Resolution", "")).lower()
+        storage_type = aggregate_storage_type(resolution)
+        if storage_type is None:
+            continue
+
+        queue_items.append(
+            {
+                "EventID": _aggregate_event_id(item),
+                "PLC_ID": item["PLC_ID"],
+                "TagName": item["TagName"],
+                "Value": item["AverageValue"],
+                "Timestamp": item["PeriodStart"],
+                "StorageType": storage_type,
+            }
+        )
+        ids.append(item["ID"])
+
+    if not queue_items:
+        return 0
+
+    added = enqueue_many(queue_items)
+    mark_queued(ids)
+    return added
+
+
+def flush_queue():
+    """Send historical aggregates/events oldest-first; delete only after ACK."""
+    while True:
+        rows = get_batch(BATCH_SIZE)
+        if not rows:
+            return True
+
+        if not _send_historical_batch(rows):
+            increment_retries([row["EventID"] for row in rows])
+            return False
+
+
+def _send_historical_batch(rows):
+    if not rows:
+        return True
+
+    url = config.SERVER_URL.rstrip("/") + "/api/store_forward"
+    payload = {"items": rows_to_payload(rows)}
 
     try:
         response = requests.post(
@@ -45,21 +129,13 @@ def _send_batch(rows):
             json=payload,
             timeout=SEND_TIMEOUT,
         )
-
         if response.status_code != 200:
-            print(
-                "STORE & FORWARD SERVER ERROR:",
-                response.status_code,
-                response.text
-            )
+            print("STORE & FORWARD SERVER ERROR:", response.status_code, response.text)
             return False
 
         result = response.json()
         if result.get("status") != "ok":
-            print(
-                "STORE & FORWARD REJECTED:",
-                result
-            )
+            print("STORE & FORWARD REJECTED:", result)
             return False
 
         acks = result.get("acks", [])
@@ -70,105 +146,117 @@ def _send_batch(rows):
 
         errors = result.get("errors") or []
         if errors:
-            increment_retries([
-                item.get("EventID")
-                for item in errors
-                if isinstance(item, dict)
-            ])
+            increment_retries(
+                [
+                    item.get("EventID")
+                    for item in errors
+                    if isinstance(item, dict)
+                ]
+            )
 
         print(
             "STORE & FORWARD ACK:",
             len(acks),
             "PENDING:",
-            pending_count()
+            pending_count(),
         )
-
         return True
 
     except Exception as exc:
-        print(
-            "STORE & FORWARD CONNECTION ERROR:",
-            exc
-        )
+        print("STORE & FORWARD CONNECTION ERROR:", exc)
         return False
 
 
-# =====================================================
-# FLUSH LOCAL QUEUE
-# =====================================================
-
-def flush_queue():
-    """Send oldest queued records first; delete only after server ACK."""
-    while True:
-        rows = get_batch(BATCH_SIZE)
-        if not rows:
-            return True
-
-        if not _send_batch(rows):
-            increment_retries([
-                row["EventID"]
-                for row in rows
-            ])
-            return False
-
-
-# =====================================================
-# SEND ALL DUE TAGS
-# =====================================================
-
-def send_all(data):
+def send_all(data, calculated=None):
     init_queue()
 
-    if not data:
-        flush_queue()
-        return
+    live_items = []
+    historical_items = []
 
-    items = []
+    for item in data or []:
+        if not isinstance(item, dict):
+            continue
+        plc_id = item.get("PLC_ID")
+        tag = item.get("TagName")
+        if plc_id is None or tag is None:
+            continue
 
-    # New multi-PLC format from plc_parallel.read_all().
-    if isinstance(data, list):
-        for item in data:
+        storage = str(item.get("StorageType", "LIVE")).strip().upper()
+        outgoing = {
+            "PLC_ID": plc_id,
+            "TagName": tag,
+            "Value": item.get("Value"),
+            "Timestamp": item.get("Timestamp") or _timestamp(),
+            "StorageType": storage,
+            "HistoryResolution": item.get(
+                "HistoryResolution",
+                item.get("history_resolution", "ALL"),
+            ),
+            "CommunicationTimeout": item.get("CommunicationTimeout"),
+        }
+
+        if storage in {"LIVE", "TIME"}:
+            live_items.append(outgoing)
+        else:
+            historical_items.append(outgoing)
+
+    calculated = calculated or []
+
+    # Raw TIME/LIVE values are aggregated locally in memory. Their samples
+    # never enter the local or server historian.
+    if live_items:
+        try:
+            record_live_values(live_items)
+        except Exception as exc:
+            print("EDGE LIVE AGGREGATION ERROR:", exc)
+
+    if calculated:
+        try:
+            record_samples(calculated)
+            rollup_completed()
+        except Exception as exc:
+            print("EDGE CALCULATED DB ERROR:", exc)
+
+        for item in calculated:
             if not isinstance(item, dict):
                 continue
-
-            plc_id = item.get("PLC_ID")
-            tag = item.get("TagName")
-            if plc_id is None or tag is None:
+            if item.get("PLC_ID") is None or item.get("TagName") is None:
                 continue
+            live_items.append(
+                {
+                    "PLC_ID": item["PLC_ID"],
+                    "TagName": item["TagName"],
+                    "Value": item.get("Value"),
+                    "Timestamp": item.get("Timestamp") or _timestamp(),
+                    "StorageType": "CALCULATED",
+                    "CommunicationTimeout": item.get("CommunicationTimeout"),
+                }
+            )
 
-            items.append({
-                "PLC_ID": plc_id,
-                "TagName": tag,
-                "Value": item.get("Value"),
-                "Timestamp": datetime.now().isoformat(),
-                "CommunicationTimeout": item.get("CommunicationTimeout"),
-            })
-
-    # Backward compatibility with the old dictionary format.
-    elif isinstance(data, dict):
-        for tag, value in data.items():
-            items.append({
-                "PLC_ID": config.PLC_ID,
-                "TagName": tag,
-                "Value": value,
-                "Timestamp": datetime.now().isoformat(),
-            })
-
-    if items:
+    if live_items or calculated:
         try:
-            added = enqueue_many(items)
-            print(
-                "STORE & FORWARD QUEUED:",
-                added,
-                "PENDING:",
-                pending_count()
-            )
+            cleanup()
         except Exception as exc:
-            print(
-                "STORE & FORWARD LOCAL QUEUE ERROR:",
-                exc
-            )
-            return
+            print("EDGE CALCULATED DB CLEANUP ERROR:", exc)
 
-    # This also attempts delivery when the server was previously offline.
+    if live_items:
+        _send_live(live_items)
+
+    if historical_items:
+        try:
+            added = enqueue_many(historical_items)
+            print("STORE & FORWARD QUEUED:", added, "PENDING:", pending_count())
+        except Exception as exc:
+            print("STORE & FORWARD LOCAL QUEUE ERROR:", exc)
+
+    try:
+        added = _queue_calculated_aggregates()
+        if added:
+            print("CALCULATED AGGREGATES QUEUED:", added)
+    except Exception as exc:
+        print("CALCULATED AGGREGATE QUEUE ERROR:", exc)
+
     flush_queue()
+
+
+__all__ = ["send_all", "flush_queue"]
