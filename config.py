@@ -15,3 +15,8 @@ SCHEDULER_TICK = 0.1
 
 # How often Edge refreshes Flow configuration
 FLOW_REFRESH_INTERVAL = 30
+
+# Maximum time the local queue may wait before a healthy-network flush.
+# This lets multiple fast scans share one HTTP request instead of sending
+# one request per scheduler tick.
+STORE_FORWARD_FLUSH_INTERVAL = 0.5

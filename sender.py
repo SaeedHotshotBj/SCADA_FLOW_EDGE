@@ -1,5 +1,7 @@
-import requests
+import time
 from datetime import datetime
+
+import requests
 
 import config
 
@@ -20,6 +22,8 @@ from store_forward import (
 
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
+FLUSH_INTERVAL = max(0.1, float(getattr(config, "STORE_FORWARD_FLUSH_INTERVAL", 0.5)))
+_last_flush_time = 0.0
 
 
 # =====================================================
@@ -69,21 +73,19 @@ def _send_batch(rows):
         delete_acked(acks)
 
         errors = result.get("errors") or []
-        if errors:
-            increment_retries([
-                item.get("EventID")
-                for item in errors
-                if isinstance(item, dict)
-            ])
 
         print(
             "STORE & FORWARD ACK:",
             len(acks),
+            "ERRORS:",
+            len(errors),
             "PENDING:",
             pending_count()
         )
 
-        return True
+        # HTTP 200 only means the batch was processed. Rejected items remain
+        # queued and must not be retried in a tight loop during this flush.
+        return not bool(errors)
 
     except Exception as exc:
         print(
@@ -99,9 +101,13 @@ def _send_batch(rows):
 
 def flush_queue():
     """Send oldest queued records first; delete only after server ACK."""
+    global _last_flush_time
+    sent_any = False
     while True:
         rows = get_batch(BATCH_SIZE)
         if not rows:
+            if sent_any:
+                _last_flush_time = time.time()
             return True
 
         if not _send_batch(rows):
@@ -109,7 +115,9 @@ def flush_queue():
                 row["EventID"]
                 for row in rows
             ])
+            _last_flush_time = time.time()
             return False
+        sent_any = True
 
 
 # =====================================================
@@ -120,7 +128,13 @@ def send_all(data):
     init_queue()
 
     if not data:
-        flush_queue()
+        now = time.time()
+        pending = pending_count()
+        if pending and (
+            pending >= BATCH_SIZE
+            or now - _last_flush_time >= FLUSH_INTERVAL
+        ):
+            flush_queue()
         return
 
     items = []
@@ -170,5 +184,12 @@ def send_all(data):
             )
             return
 
-    # This also attempts delivery when the server was previously offline.
-    flush_queue()
+    # Batch healthy-network traffic without delaying delivery for too long.
+    global _last_flush_time
+    now = time.time()
+    should_flush = (
+        pending_count() >= BATCH_SIZE
+        or now - _last_flush_time >= FLUSH_INTERVAL
+    )
+    if should_flush:
+        flush_queue()
