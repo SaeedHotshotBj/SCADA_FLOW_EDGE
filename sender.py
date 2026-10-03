@@ -92,6 +92,12 @@ def _queue_calculated_aggregates():
                 "Value": item["AverageValue"],
                 "Timestamp": item["PeriodStart"],
                 "StorageType": storage_type,
+                "HistoryResolution": resolution,
+                "PeriodEnd": item.get("PeriodEnd"),
+                "AverageValue": item.get("AverageValue"),
+                "MinValue": item.get("MinValue"),
+                "MaxValue": item.get("MaxValue"),
+                "SampleCount": item.get("SampleCount"),
             }
         )
         ids.append(item["ID"])
