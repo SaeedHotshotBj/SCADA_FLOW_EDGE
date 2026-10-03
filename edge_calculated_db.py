@@ -123,6 +123,72 @@ _LIVE_LOCK = threading.RLock()
 _LIVE_BUCKETS = {}
 
 
+def _normalize_flow_resolution(value):
+    raw = str(value or "ALL").strip().upper()
+    if raw in {"", "ALL"}:
+        return "ALL"
+    if raw in {"NONE", "OFF"}:
+        return "NONE"
+    return raw.lower() if raw.lower() in {"minute", "hour", "day", "month"} else None
+
+
+def get_flow_history_resolution_map():
+    """Return Flow-authorized history resolution for TIME and calculated tags."""
+    try:
+        import plc
+        from edge_calculator import _expression_plan
+
+        _, mappings = plc.get_runtime_configuration()
+        flow = plc.get_flow_config()
+        result = {}
+
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            if str(mapping.get("storage", "")).strip().upper() != "TIME":
+                continue
+            try:
+                plc_id = int(mapping["plc_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            tag = str(mapping.get("name", "")).strip().lower()
+            if not tag:
+                continue
+            resolution = _normalize_flow_resolution(
+                mapping.get("history_resolution", mapping.get("HistoryResolution", "ALL"))
+            )
+            if resolution is not None:
+                result[(plc_id, tag)] = resolution
+
+        # Calculated outputs are authoritative when a calculated output name
+        # happens to match a raw TIME/LIVE tag name.
+        for item in _expression_plan(flow or {}):
+            resolution = _normalize_flow_resolution(item.get("history_resolution"))
+            if resolution is None:
+                continue
+            for plc_id in item.get("plc_ids", []):
+                try:
+                    result[(int(plc_id), str(item["name"]).strip().lower())] = resolution
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+        return result
+    except Exception as exc:
+        print("EDGE FLOW HISTORY RESOLUTION MAP ERROR:", exc)
+        return {}
+
+
+def get_flow_history_resolution(plc_id, tag_name):
+    try:
+        plc_id = int(plc_id)
+    except (TypeError, ValueError):
+        return None
+    tag = str(tag_name or "").strip().lower()
+    if not tag:
+        return None
+    return get_flow_history_resolution_map().get((plc_id, tag))
+
+
 def _new_bucket(start):
     return {
         "start": start,
@@ -354,10 +420,25 @@ def _aggregate_bucket(conn, plc_id, tag_name, resolution, start, end):
     )
 
 
+def _previous_bucket_start(start, resolution):
+    if resolution == "minute":
+        return start - timedelta(minutes=1)
+    if resolution == "hour":
+        return start - timedelta(hours=1)
+    if resolution == "day":
+        return start - timedelta(days=1)
+    if resolution == "month":
+        if start.month == 1:
+            return start.replace(year=start.year - 1, month=12, day=1)
+        return start.replace(month=start.month - 1, day=1)
+    raise ValueError("Unsupported aggregation resolution: %s" % resolution)
+
+
 def rollup_completed():
     init_calculated_db()
     now = datetime.now(TZ).replace(tzinfo=None, microsecond=0)
     results = 0
+    flow_resolution_map = get_flow_history_resolution_map()
     conn = _connect()
     try:
         tag_rows = conn.execute(
@@ -367,12 +448,25 @@ def rollup_completed():
         for tag_row in tag_rows:
             plc_id = int(tag_row["PLC_ID"])
             tag = str(tag_row["TagName"])
+            flow_resolution = flow_resolution_map.get((plc_id, tag.lower()))
 
-            for resolution in ("minute", "hour", "day"):
-                completed = _bucket_start(now, resolution) - {
+            if flow_resolution in (None, "NONE"):
+                continue
+
+            if flow_resolution == "ALL":
+                resolutions = ("minute", "hour", "day")
+            else:
+                resolutions = (flow_resolution,)
+
+            for resolution in resolutions:
+                current_bucket = _bucket_start(now, resolution)
+                completed = _previous_bucket_start(current_bucket, resolution)
+
+                step = {
                     "minute": timedelta(minutes=1),
                     "hour": timedelta(hours=1),
                     "day": timedelta(days=1),
+                    "month": None,
                 }[resolution]
 
                 last = conn.execute(
@@ -385,11 +479,10 @@ def rollup_completed():
                 ).fetchone()
 
                 if last and last["LastStart"]:
-                    cursor = _parse_ts(last["LastStart"]) + {
-                        "minute": timedelta(minutes=1),
-                        "hour": timedelta(hours=1),
-                        "day": timedelta(days=1),
-                    }[resolution]
+                    cursor = _bucket_end(
+                        _parse_ts(last["LastStart"]),
+                        resolution,
+                    )
                 else:
                     oldest = conn.execute(
                         """
@@ -399,7 +492,8 @@ def rollup_completed():
                         """,
                         (plc_id, tag),
                     ).fetchone()["Oldest"]
-                    cursor = _bucket_start(_parse_ts(oldest), resolution) if oldest else None
+                    oldest_dt = _parse_ts(oldest)
+                    cursor = _bucket_start(oldest_dt, resolution) if oldest_dt else None
 
                 if cursor is None:
                     continue
@@ -408,14 +502,28 @@ def rollup_completed():
                     "minute": now - timedelta(hours=MINUTE_RETENTION_HOURS),
                     "hour": now - timedelta(days=HOUR_RETENTION_DAYS),
                     "day": now - timedelta(days=DAY_RETENTION_DAYS),
+                    "month": now - timedelta(days=DAY_RETENTION_DAYS),
                 }[resolution]
                 cursor = max(cursor, _bucket_start(retention_floor, resolution))
 
-                limit = 240 if resolution == "minute" else 48 if resolution == "hour" else 10
+                limit = {
+                    "minute": 240,
+                    "hour": 48,
+                    "day": 10,
+                    "month": 24,
+                }[resolution]
+
                 loops = 0
                 while cursor <= completed and loops < limit:
                     end = _bucket_end(cursor, resolution)
-                    aggregate = _aggregate_bucket(conn, plc_id, tag, resolution, cursor, end)
+                    aggregate = _aggregate_bucket(
+                        conn,
+                        plc_id,
+                        tag,
+                        resolution,
+                        cursor,
+                        end,
+                    )
                     if aggregate is not None:
                         conn.execute(
                             """
@@ -449,6 +557,23 @@ def rollup_completed():
 
         conn.commit()
         return results
+    finally:
+        conn.close()
+
+def delete_aggregates(ids):
+    ids = [int(item) for item in ids if item is not None]
+    if not ids:
+        return 0
+    init_calculated_db()
+    conn = _connect()
+    try:
+        conn.executemany(
+            "DELETE FROM CalculatedAggregates WHERE ID=?",
+            [(item,) for item in ids],
+        )
+        count = conn.total_changes
+        conn.commit()
+        return count
     finally:
         conn.close()
 
@@ -536,6 +661,9 @@ __all__ = [
     "rollup_completed",
     "pending_aggregates",
     "mark_queued",
+    "delete_aggregates",
+    "get_flow_history_resolution",
+    "get_flow_history_resolution_map",
     "cleanup",
     "aggregate_storage_type",
 ]
