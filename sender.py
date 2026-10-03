@@ -14,6 +14,8 @@ from edge_calculated_db import (
     record_samples,
     rollup_completed,
     cleanup,
+    delete_aggregates,
+    get_flow_history_resolution_map,
 )
 from store_forward import (
     delete_acked,
@@ -81,10 +83,35 @@ def _queue_calculated_aggregates():
 
     queue_items = []
     ids = []
+    stale_ids = []
+    flow_resolution_map = get_flow_history_resolution_map()
+
     for item in pending:
         resolution = str(item.get("Resolution", "")).lower()
         storage_type = aggregate_storage_type(resolution)
         if storage_type is None:
+            stale_ids.append(item.get("ID"))
+            continue
+
+        try:
+            plc_id = int(item["PLC_ID"])
+        except (KeyError, TypeError, ValueError):
+            stale_ids.append(item.get("ID"))
+            continue
+
+        tag_key = str(item.get("TagName", "")).strip().lower()
+        flow_resolution = flow_resolution_map.get((plc_id, tag_key))
+
+        allowed = (
+            flow_resolution in {"ALL", resolution}
+            and (
+                flow_resolution != "ALL"
+                or resolution in {"minute", "hour", "day"}
+            )
+        )
+
+        if not allowed:
+            stale_ids.append(item.get("ID"))
             continue
 
         queue_items.append(
@@ -104,6 +131,14 @@ def _queue_calculated_aggregates():
             }
         )
         ids.append(item["ID"])
+
+    if stale_ids:
+        removed = delete_aggregates(stale_ids)
+        if removed:
+            print(
+                "CALCULATED AGGREGATES DISCARDED BY CURRENT FLOW:",
+                removed,
+            )
 
     if not queue_items:
         return 0
