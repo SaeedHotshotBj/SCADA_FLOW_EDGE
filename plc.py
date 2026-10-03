@@ -1,9 +1,11 @@
 import time
 import requests
+from datetime import datetime
 
 from pymodbus.client.sync import ModbusTcpClient
 
 import config
+import edge_data
 
 
 # ============================================================
@@ -329,7 +331,33 @@ def get_runtime_configuration():
                 interval = 1.0
 
             datatype = str(raw_mapping.get("datatype", "INT")).upper()
-            storage = str(raw_mapping.get("storage", "TIME")).upper()
+            storage = str(raw_mapping.get("storage", "TIME")).upper().strip()
+            if storage not in {"TIME", "LIVE", "TRIGGER"}:
+                continue
+
+            try:
+                interval = float(raw_mapping.get("interval", 1))
+            except (TypeError, ValueError):
+                interval = 1.0
+            if interval <= 0:
+                interval = 1.0
+
+            try:
+                live_interval = float(raw_mapping.get("live_interval", interval))
+            except (TypeError, ValueError):
+                live_interval = interval
+            if live_interval <= 0:
+                live_interval = interval
+
+            raw_resolution = str(
+                raw_mapping.get("history_resolution", "MINUTE")
+            ).strip().upper()
+            history_resolution = {
+                "MINUTE": "minute",
+                "HOUR": "hour",
+                "DAY": "day",
+                "ALL": "minute",
+            }.get(raw_resolution, "minute")
 
             trigger_register = raw_mapping.get("trigger_register", 0)
             trigger_value = raw_mapping.get("trigger_value", 0)
@@ -393,6 +421,9 @@ def get_runtime_configuration():
                     "scale": scale,
                     "storage": storage,
                     "interval": interval,
+                    "live_interval": live_interval,
+                    "schedule_interval": live_interval if storage == "LIVE" else interval,
+                    "history_resolution": history_resolution,
                     "trigger_register": trigger_register,
                     "trigger_value": trigger_value,
                 })
@@ -524,6 +555,8 @@ def update_scheduler(mappings):
             mapping["datatype"],
             mapping["scale"],
             mapping["storage"],
+            mapping.get("live_interval"),
+            mapping.get("history_resolution"),
             mapping["trigger_register"],
             mapping["trigger_value"],
         )
@@ -566,7 +599,7 @@ def tag_is_due(mapping, now):
 
 def schedule_next(mapping, now):
     try:
-        interval = float(mapping.get("interval", 1))
+        interval = float(mapping.get("schedule_interval", mapping.get("interval", 1)))
     except Exception:
         interval = 1.0
 
@@ -635,6 +668,42 @@ def read_all():
         communication_timeout = plc_config.get("communication_timeout")
 
         # ----------------------------------------------------
+        # LIVE STORAGE
+        # ----------------------------------------------------
+        for mapping in plc_mappings:
+            if mapping["storage"] != "LIVE":
+                continue
+
+            if not tag_is_due(mapping, now):
+                continue
+
+            register = mapping["register"]
+            name = mapping["name"]
+            value = read_register(client, register, slave)
+            schedule_next(mapping, now)
+
+            if value is None:
+                continue
+
+            try:
+                value = convert_value(value, mapping)
+            except Exception as e:
+                print("VALUE CONVERSION ERROR:", "PLC_ID:", plc_id, name, e)
+                continue
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+            data.append({
+                "PLC_ID": plc_id,
+                "TagName": name,
+                "Value": value,
+                "Timestamp": timestamp,
+                "StorageType": "LIVE",
+                "CommunicationTimeout": communication_timeout,
+            })
+
+            print("LIVE:", "PLC_ID:", plc_id, name, value, "REGISTER:", register, "INTERVAL:", mapping.get("live_interval"))
+
+        # ----------------------------------------------------
         # TIME STORAGE
         # ----------------------------------------------------
         for mapping in plc_mappings:
@@ -669,12 +738,27 @@ def read_all():
                 )
                 continue
 
-            data.append({
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+            closed_aggregates = edge_data.record_time_sample(
+                plc_id,
+                name,
+                value,
+                timestamp,
+                mapping.get("history_resolution", "minute"),
+            )
+
+            item = {
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
+                "Timestamp": timestamp,
+                "StorageType": "TIME",
+                "HistoryResolution": mapping.get("history_resolution", "minute"),
                 "CommunicationTimeout": communication_timeout,
-            })
+            }
+            if closed_aggregates:
+                item["_ClosedAggregates"] = closed_aggregates
+            data.append(item)
 
             print(
                 "DUE:",
@@ -756,6 +840,8 @@ def read_all():
                     "PLC_ID": plc_id,
                     "TagName": name,
                     "Value": value,
+                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip("."),
+                    "StorageType": "TRIGGER",
                     "CommunicationTimeout": communication_timeout,
                 })
 

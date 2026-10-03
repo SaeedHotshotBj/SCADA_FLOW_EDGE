@@ -53,14 +53,10 @@ def plc_loop():
 
             data = read_all()
 
-            if data:
-
-                send_all(data)
-
-            else:
-
-                # No tag is due at this moment.
-                pass
+            # Always give Store & Forward a chance to flush previously
+            # queued aggregate/trigger records, even when no new TIME/LIVE
+            # sample is due at this scheduler tick.
+            send_all(data)
 
         except Exception as e:
 
