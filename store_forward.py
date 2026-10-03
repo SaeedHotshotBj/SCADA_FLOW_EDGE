@@ -131,7 +131,7 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_t
                     DurationSeconds,
                     SampleCount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -225,7 +225,7 @@ def enqueue_many(items):
                     DurationSeconds,
                     SampleCount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
