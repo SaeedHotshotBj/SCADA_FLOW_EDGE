@@ -54,6 +54,15 @@ def init_queue():
                     Timestamp TEXT NOT NULL,
                     CommunicationTimeout REAL,
                     StorageType TEXT,
+                    HistoryResolution TEXT,
+                    PeriodEnd TEXT,
+                    FirstValue REAL,
+                    LastValue REAL,
+                    AverageValue REAL,
+                    MinValue REAL,
+                    MaxValue REAL,
+                    DurationSeconds REAL,
+                    SampleCount INTEGER,
                     RetryCount INTEGER NOT NULL DEFAULT 0,
                     CreatedAt TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
                 )
@@ -65,6 +74,21 @@ def init_queue():
             }
             if "StorageType" not in columns:
                 conn.execute("ALTER TABLE StoreForwardQueue ADD COLUMN StorageType TEXT")
+            for column, sql_type in (
+                ("HistoryResolution", "TEXT"),
+                ("PeriodEnd", "TEXT"),
+                ("FirstValue", "REAL"),
+                ("LastValue", "REAL"),
+                ("AverageValue", "REAL"),
+                ("MinValue", "REAL"),
+                ("MaxValue", "REAL"),
+                ("DurationSeconds", "REAL"),
+                ("SampleCount", "INTEGER"),
+            ):
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE StoreForwardQueue ADD COLUMN {column} {sql_type}"
+                    )
 
             conn.execute(
                 """
@@ -77,7 +101,7 @@ def init_queue():
             conn.close()
 
 
-def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_type=None, event_id=None):
+def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_type=None, event_id=None, history_resolution=None, period_end=None, first_value=None, last_value=None, average_value=None, min_value=None, max_value=None, duration_seconds=None, sample_count=None):
     storage_type = str(storage_type or "").strip().upper() or None
     if storage_type in {"LIVE", "TIME"}:
         raise ValueError("LIVE/TIME data must never enter Store & Forward")
@@ -96,9 +120,18 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_t
                     Value,
                     Timestamp,
                     CommunicationTimeout,
-                    StorageType
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    AverageValue,
+                    MinValue,
+                    MaxValue,
+                    DurationSeconds,
+                    SampleCount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -108,6 +141,15 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None, storage_t
                     str(timestamp),
                     communication_timeout,
                     storage_type,
+                    history_resolution,
+                    period_end,
+                    first_value,
+                    last_value,
+                    average_value,
+                    min_value,
+                    max_value,
+                    duration_seconds,
+                    sample_count,
                 ),
             )
             conn.commit()
@@ -144,6 +186,15 @@ def enqueue_many(items):
                 str(item.get("Timestamp")),
                 item.get("CommunicationTimeout"),
                 storage_type,
+                item.get("HistoryResolution", item.get("history_resolution")),
+                item.get("PeriodEnd"),
+                item.get("FirstValue"),
+                item.get("LastValue"),
+                item.get("AverageValue"),
+                item.get("MinValue"),
+                item.get("MaxValue"),
+                item.get("DurationSeconds"),
+                item.get("SampleCount"),
             )
         )
 
@@ -163,9 +214,18 @@ def enqueue_many(items):
                     Value,
                     Timestamp,
                     CommunicationTimeout,
-                    StorageType
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    AverageValue,
+                    MinValue,
+                    MaxValue,
+                    DurationSeconds,
+                    SampleCount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -190,7 +250,16 @@ def get_batch(limit=100):
                     Value,
                     Timestamp,
                     CommunicationTimeout,
-                    StorageType
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    AverageValue,
+                    MinValue,
+                    MaxValue,
+                    DurationSeconds,
+                    SampleCount
                 FROM StoreForwardQueue
                 ORDER BY ID ASC
                 LIMIT ?
@@ -265,6 +334,15 @@ def rows_to_payload(rows):
             "Value": row["Value"],
             "Timestamp": row["Timestamp"],
             "StorageType": row["StorageType"],
+            "HistoryResolution": row["HistoryResolution"],
+            "PeriodEnd": row["PeriodEnd"],
+            "FirstValue": row["FirstValue"],
+            "LastValue": row["LastValue"],
+            "AverageValue": row["AverageValue"],
+            "MinValue": row["MinValue"],
+            "MaxValue": row["MaxValue"],
+            "DurationSeconds": row["DurationSeconds"],
+            "SampleCount": row["SampleCount"],
         }
         for row in rows
     ]
