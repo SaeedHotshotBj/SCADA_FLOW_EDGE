@@ -159,6 +159,10 @@ def _expression_plan(flow):
                 "plc_ids": plc_ids,
                 "label": str(item.get("label", name)).strip() or name,
                 "unit": str(item.get("unit", "")).strip(),
+                "history_resolution": str(
+                    item.get("history_resolution", item.get("HistoryResolution", "ALL"))
+                    or "ALL"
+                ).strip().upper(),
             })
 
     _calculation_cache = plan
@@ -273,6 +277,7 @@ def calculate(data):
                 "TagName": item["name"],
                 "Value": value,
                 "StorageType": "CALCULATED",
+                "HistoryResolution": item.get("history_resolution", "ALL"),
                 "Timestamp": datetime.now(TZ).replace(tzinfo=None).isoformat(),
                 "title": item["label"],
                 "unit": item["unit"],
