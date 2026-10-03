@@ -1,5 +1,4 @@
 import requests
-from datetime import datetime
 
 import config
 
@@ -12,32 +11,49 @@ from store_forward import (
     pending_count,
     rows_to_payload,
 )
+from edge_data import mark_aggregates_queued
 
-
-# =====================================================
-# STORE & FORWARD CONFIG
-# =====================================================
 
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
 
 
-# =====================================================
-# SERVER SEND
-# =====================================================
+def _send_live_batch(items):
+    if not items:
+        return True
+
+    url = config.SERVER_URL.rstrip("/") + "/api/edge/live"
+    payload = {"items": items}
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=SEND_TIMEOUT,
+        )
+        if response.status_code != 200:
+            print("EDGE LIVE SEND ERROR:", response.status_code, response.text)
+            return False
+
+        result = response.json()
+        if result.get("status") != "ok":
+            print("EDGE LIVE SEND REJECTED:", result)
+            return False
+
+        print("EDGE LIVE SENT:", len(items), "ACCEPTED:", result.get("accepted", 0))
+        return True
+    except Exception as exc:
+        # LIVE is intentionally not persisted. A failed live request is dropped.
+        print("EDGE LIVE CONNECTION ERROR:", exc)
+        return False
+
 
 def _send_batch(rows):
     if not rows:
-        return False
+        return True
 
-    url = (
-        config.SERVER_URL.rstrip("/")
-        + "/api/store_forward"
-    )
-
-    payload = {
-        "items": rows_to_payload(rows)
-    }
+    url = config.SERVER_URL.rstrip("/") + "/api/store_forward"
+    payload = {"items": rows_to_payload(rows)}
 
     try:
         response = requests.post(
@@ -47,55 +63,48 @@ def _send_batch(rows):
         )
 
         if response.status_code != 200:
-            print(
-                "STORE & FORWARD SERVER ERROR:",
-                response.status_code,
-                response.text
-            )
+            print("STORE & FORWARD SERVER ERROR:", response.status_code, response.text)
+            increment_retries([row["EventID"] for row in rows])
             return False
 
         result = response.json()
         if result.get("status") != "ok":
-            print(
-                "STORE & FORWARD REJECTED:",
-                result
-            )
+            print("STORE & FORWARD REJECTED:", result)
+            increment_retries([row["EventID"] for row in rows])
             return False
 
         acks = result.get("acks", [])
-        if not isinstance(acks, list):
+        errors = result.get("errors") or []
+        if not isinstance(acks, list) or not isinstance(errors, list):
+            increment_retries([row["EventID"] for row in rows])
             return False
 
         delete_acked(acks)
 
-        errors = result.get("errors") or []
-        if errors:
-            increment_retries([
-                item.get("EventID")
-                for item in errors
-                if isinstance(item, dict)
-            ])
+        error_ids = [
+            item.get("EventID")
+            for item in errors
+            if isinstance(item, dict) and item.get("EventID")
+        ]
+        if error_ids:
+            increment_retries(error_ids)
+            print("STORE & FORWARD ITEM ERRORS:", errors)
 
         print(
-            "STORE & FORWARD ACK:",
-            len(acks),
-            "PENDING:",
-            pending_count()
+            "STORE & FORWARD ACK:", len(acks),
+            "ERRORS:", len(errors),
+            "PENDING:", pending_count(),
         )
 
-        return True
+        # Stop flushing when the server explicitly rejected items. They remain
+        # queued for a later retry instead of spinning on HTTP 200 + errors.
+        return not errors
 
     except Exception as exc:
-        print(
-            "STORE & FORWARD CONNECTION ERROR:",
-            exc
-        )
+        print("STORE & FORWARD CONNECTION ERROR:", exc)
+        increment_retries([row["EventID"] for row in rows])
         return False
 
-
-# =====================================================
-# FLUSH LOCAL QUEUE
-# =====================================================
 
 def flush_queue():
     """Send oldest queued records first; delete only after server ACK."""
@@ -103,72 +112,122 @@ def flush_queue():
         rows = get_batch(BATCH_SIZE)
         if not rows:
             return True
-
         if not _send_batch(rows):
-            increment_retries([
-                row["EventID"]
-                for row in rows
-            ])
             return False
 
 
-# =====================================================
-# SEND ALL DUE TAGS
-# =====================================================
+def _normalize_items(data):
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [
+            {
+                "PLC_ID": config.PLC_ID,
+                "TagName": tag,
+                "Value": value,
+                "Timestamp": None,
+                "StorageType": "LIVE",
+            }
+            for tag, value in data.items()
+        ]
+    return []
+
 
 def send_all(data):
     init_queue()
 
-    if not data:
+    items = _normalize_items(data)
+    if not items:
         flush_queue()
         return
 
-    items = []
+    live_items = []
+    queue_items = []
+    aggregate_keys = []
 
-    # New multi-PLC format from plc_parallel.read_all().
-    if isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
+    for item in items:
+        plc_id = item.get("PLC_ID")
+        tag = item.get("TagName")
+        if plc_id is None or tag is None:
+            continue
 
-            plc_id = item.get("PLC_ID")
-            tag = item.get("TagName")
-            if plc_id is None or tag is None:
-                continue
-
-            items.append({
+        storage = str(item.get("StorageType", "") or "").strip().upper()
+        if storage == "LIVE":
+            live_items.append({
                 "PLC_ID": plc_id,
                 "TagName": tag,
                 "Value": item.get("Value"),
-                "Timestamp": datetime.now().isoformat(),
+                "Timestamp": item.get("Timestamp"),
+                "StorageType": "LIVE",
+            })
+            continue
+
+        if storage == "TIME":
+            # TIME samples are also displayed live, but the raw sample is never
+            # placed in the network queue or persisted on the server.
+            live_items.append({
+                "PLC_ID": plc_id,
+                "TagName": tag,
+                "Value": item.get("Value"),
+                "Timestamp": item.get("Timestamp"),
+                "StorageType": "TIME",
+            })
+
+            resolution = str(item.get("HistoryResolution", "") or "").strip().lower()
+            for aggregate in item.get("_ClosedAggregates", []) or []:
+                if not isinstance(aggregate, dict):
+                    continue
+                aggregate_resolution = str(
+                    aggregate.get("HistoryResolution", resolution)
+                ).strip().lower()
+                if aggregate_resolution not in {"minute", "hour", "day"}:
+                    continue
+                if resolution and aggregate_resolution != resolution:
+                    continue
+                queue_items.append({
+                    "PLC_ID": plc_id,
+                    "TagName": tag,
+                    "Value": aggregate.get("WeightedAverage"),
+                    "Timestamp": aggregate.get("PeriodStart"),
+                    "StorageType": "TIME",
+                    "HistoryResolution": aggregate_resolution,
+                    "PeriodEnd": aggregate.get("PeriodEnd"),
+                    "FirstValue": aggregate.get("FirstValue"),
+                    "LastValue": aggregate.get("LastValue"),
+                    "MinValue": aggregate.get("MinValue"),
+                    "MaxValue": aggregate.get("MaxValue"),
+                    "WeightedAverage": aggregate.get("WeightedAverage"),
+                    "DurationSeconds": aggregate.get("DurationSeconds"),
+                    "SampleCount": aggregate.get("SampleCount"),
+                })
+                aggregate_keys.append(aggregate)
+            continue
+
+        if storage == "TRIGGER":
+            queue_items.append({
+                "PLC_ID": plc_id,
+                "TagName": tag,
+                "Value": item.get("Value"),
+                "Timestamp": item.get("Timestamp"),
+                "StorageType": "TRIGGER",
                 "CommunicationTimeout": item.get("CommunicationTimeout"),
             })
 
-    # Backward compatibility with the old dictionary format.
-    elif isinstance(data, dict):
-        for tag, value in data.items():
-            items.append({
-                "PLC_ID": config.PLC_ID,
-                "TagName": tag,
-                "Value": value,
-                "Timestamp": datetime.now().isoformat(),
-            })
+    # LIVE/TIME values intentionally bypass Store & Forward.
+    _send_live_batch(live_items)
 
-    if items:
+    if queue_items:
         try:
-            added = enqueue_many(items)
-            print(
-                "STORE & FORWARD QUEUED:",
-                added,
-                "PENDING:",
-                pending_count()
-            )
+            added = enqueue_many(queue_items)
+            if added != len(queue_items):
+                print("STORE & FORWARD QUEUE COUNT MISMATCH:", added, len(queue_items))
+            else:
+                # Mark local aggregate rows only after they have become durable
+                # in Store & Forward. A retry therefore cannot lose a period.
+                mark_aggregates_queued(aggregate_keys)
+            print("STORE & FORWARD QUEUED:", added, "PENDING:", pending_count())
         except Exception as exc:
-            print(
-                "STORE & FORWARD LOCAL QUEUE ERROR:",
-                exc
-            )
+            print("STORE & FORWARD LOCAL QUEUE ERROR:", exc)
             return
 
-    # This also attempts delivery when the server was previously offline.
     flush_queue()

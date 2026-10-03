@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import plc as _plc
 
@@ -14,6 +15,40 @@ def _read_one_plc(plc_config, plc_mappings, now):
     slave = plc_config["slave"]
     communication_timeout = plc_config.get("communication_timeout")
     data = []
+
+    # --------------------------------------------------------
+    # LIVE STORAGE
+    # --------------------------------------------------------
+    for mapping in plc_mappings:
+        if mapping["storage"] != "LIVE":
+            continue
+
+        if not _plc.tag_is_due(mapping, now):
+            continue
+
+        register = mapping["register"]
+        name = mapping["name"]
+        value = _plc.read_register(client, register, slave)
+        _plc.schedule_next(mapping, now)
+        if value is None:
+            continue
+
+        try:
+            value = _plc.convert_value(value, mapping)
+        except Exception as e:
+            print("VALUE CONVERSION ERROR:", "PLC_ID:", plc_id, name, e)
+            continue
+
+        data.append({
+            "PLC_ID": plc_id,
+            "TagName": name,
+            "Value": value,
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip("."),
+            "StorageType": "LIVE",
+            "CommunicationTimeout": communication_timeout,
+        })
+
+        print("LIVE:", "PLC_ID:", plc_id, name, value, "REGISTER:", register, "INTERVAL:", mapping.get("live_interval"))
 
     # --------------------------------------------------------
     # TIME STORAGE
@@ -50,12 +85,26 @@ def _read_one_plc(plc_config, plc_mappings, now):
             )
             continue
 
-        data.append({
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+        closed_aggregates = _plc.edge_data.record_time_sample(
+            plc_id,
+            name,
+            value,
+            timestamp,
+            mapping.get("history_resolution", "minute"),
+        )
+        item = {
             "PLC_ID": plc_id,
             "TagName": name,
             "Value": value,
+            "Timestamp": timestamp,
+            "StorageType": "TIME",
+            "HistoryResolution": mapping.get("history_resolution", "minute"),
             "CommunicationTimeout": communication_timeout,
-        })
+        }
+        if closed_aggregates:
+            item["_ClosedAggregates"] = closed_aggregates
+        data.append(item)
 
         print(
             "DUE:",
@@ -137,6 +186,8 @@ def _read_one_plc(plc_config, plc_mappings, now):
                 "PLC_ID": plc_id,
                 "TagName": name,
                 "Value": value,
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip("."),
+                "StorageType": "TRIGGER",
                 "CommunicationTimeout": communication_timeout,
             })
 

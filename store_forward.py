@@ -52,12 +52,44 @@ def init_queue():
                     TagName TEXT NOT NULL,
                     Value REAL,
                     Timestamp TEXT NOT NULL,
+                    StorageType TEXT,
+                    HistoryResolution TEXT,
+                    PeriodEnd TEXT,
+                    FirstValue REAL,
+                    LastValue REAL,
+                    MinValue REAL,
+                    MaxValue REAL,
+                    WeightedAverage REAL,
+                    DurationSeconds REAL,
+                    SampleCount INTEGER,
                     CommunicationTimeout REAL,
                     RetryCount INTEGER NOT NULL DEFAULT 0,
                     CreatedAt TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
                 )
                 """
             )
+            required_columns = {
+                "StorageType": "TEXT",
+                "HistoryResolution": "TEXT",
+                "PeriodEnd": "TEXT",
+                "FirstValue": "REAL",
+                "LastValue": "REAL",
+                "MinValue": "REAL",
+                "MaxValue": "REAL",
+                "WeightedAverage": "REAL",
+                "DurationSeconds": "REAL",
+                "SampleCount": "INTEGER",
+            }
+            existing_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(StoreForwardQueue)").fetchall()
+            }
+            for column, column_type in required_columns.items():
+                if column not in existing_columns:
+                    conn.execute(
+                        f"ALTER TABLE StoreForwardQueue ADD COLUMN {column} {column_type}"
+                    )
+
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_store_forward_queue_id
@@ -84,9 +116,19 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None):
                     TagName,
                     Value,
                     Timestamp,
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    MinValue,
+                    MaxValue,
+                    WeightedAverage,
+                    DurationSeconds,
+                    SampleCount,
                     CommunicationTimeout
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -94,6 +136,15 @@ def enqueue(plc_id, tag, value, timestamp, communication_timeout=None):
                     str(tag),
                     value,
                     str(timestamp),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     communication_timeout,
                 ),
             )
@@ -125,6 +176,16 @@ def enqueue_many(items):
                 str(tag),
                 item.get("Value"),
                 str(item.get("Timestamp")),
+                item.get("StorageType"),
+                item.get("HistoryResolution"),
+                item.get("PeriodEnd"),
+                item.get("FirstValue"),
+                item.get("LastValue"),
+                item.get("MinValue"),
+                item.get("MaxValue"),
+                item.get("WeightedAverage"),
+                item.get("DurationSeconds"),
+                item.get("SampleCount"),
                 item.get("CommunicationTimeout"),
             )
         )
@@ -144,9 +205,19 @@ def enqueue_many(items):
                     TagName,
                     Value,
                     Timestamp,
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    MinValue,
+                    MaxValue,
+                    WeightedAverage,
+                    DurationSeconds,
+                    SampleCount,
                     CommunicationTimeout
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -170,6 +241,16 @@ def get_batch(limit=100):
                     TagName,
                     Value,
                     Timestamp,
+                    StorageType,
+                    HistoryResolution,
+                    PeriodEnd,
+                    FirstValue,
+                    LastValue,
+                    MinValue,
+                    MaxValue,
+                    WeightedAverage,
+                    DurationSeconds,
+                    SampleCount,
                     CommunicationTimeout
                 FROM StoreForwardQueue
                 ORDER BY ID ASC
@@ -244,10 +325,19 @@ def rows_to_payload(rows):
             "TagName": row["TagName"],
             "Value": row["Value"],
             "Timestamp": row["Timestamp"],
+            "StorageType": row.get("StorageType"),
+            "HistoryResolution": row.get("HistoryResolution"),
+            "PeriodEnd": row.get("PeriodEnd"),
+            "FirstValue": row.get("FirstValue"),
+            "LastValue": row.get("LastValue"),
+            "MinValue": row.get("MinValue"),
+            "MaxValue": row.get("MaxValue"),
+            "WeightedAverage": row.get("WeightedAverage"),
+            "DurationSeconds": row.get("DurationSeconds"),
+            "SampleCount": row.get("SampleCount"),
         }
         for row in rows
     ]
-
 
 __all__ = [
     "init_queue",
