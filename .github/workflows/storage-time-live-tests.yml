@@ -69,6 +69,33 @@ jobs:
                   for item in closed_again
               ), closed_again
 
+              # The selected resolution is the minimum upload resolution:
+              # MINUTE uploads Minute + Hour + Day.
+              edge_data.record_time_sample(
+                  1, "Y", 0, "2026-10-03 23:59:50", "minute"
+              )
+              closed_upward_minute = edge_data.record_time_sample(
+                  1, "Y", 10, "2026-10-04 00:00:10", "minute"
+              )
+              assert {item["HistoryResolution"] for item in closed_upward_minute} == {
+                  "minute", "hour", "day"
+              }, closed_upward_minute
+              assert all(
+                  item["PeriodEnd"] <= "2026-10-04 00:00:10"
+                  for item in closed_upward_minute
+              ), closed_upward_minute
+
+              # HOUR uploads Hour + Day, but not Minute.
+              edge_data.record_time_sample(
+                  1, "Z", 0, "2026-10-03 23:59:50", "hour"
+              )
+              closed_upward_hour = edge_data.record_time_sample(
+                  1, "Z", 10, "2026-10-04 00:00:10", "hour"
+              )
+              assert {item["HistoryResolution"] for item in closed_upward_hour} == {
+                  "hour", "day"
+              }, closed_upward_hour
+
               conn.close()
               print("TIME WEIGHTED AGGREGATE TEST OK")
           finally:
@@ -76,6 +103,48 @@ jobs:
                   os.remove(path)
               except OSError:
                   pass
+          PY
+
+      - name: Verify TIME resolution upload hierarchy in sender
+        run: |
+          python - <<'PY'
+          import sender
+
+          aggregates = [
+              {"ID": 1, "HistoryResolution": "minute", "WeightedAverage": 1.0, "PeriodStart": "2026-10-03 11:59:00", "PeriodEnd": "2026-10-03 12:00:00"},
+              {"ID": 2, "HistoryResolution": "hour", "WeightedAverage": 2.0, "PeriodStart": "2026-10-03 11:00:00", "PeriodEnd": "2026-10-03 12:00:00"},
+              {"ID": 3, "HistoryResolution": "day", "WeightedAverage": 3.0, "PeriodStart": "2026-10-03 00:00:00", "PeriodEnd": "2026-10-04 00:00:00"},
+          ]
+
+          queued = []
+          sender.init_queue = lambda: None
+          sender._send_live_batch = lambda items: True
+          sender.flush_queue = lambda: True
+          sender.enqueue_many = lambda items: queued.extend(items) or len(items)
+          sender.mark_aggregates_queued = lambda items: None
+
+          base = {
+              "PLC_ID": 1,
+              "TagName": "X",
+              "Value": 10.0,
+              "Timestamp": "2026-10-04 00:00:10",
+              "StorageType": "TIME",
+              "_ClosedAggregates": aggregates,
+          }
+
+          for selected, expected in (
+              ("minute", {"minute", "hour", "day"}),
+              ("hour", {"hour", "day"}),
+              ("day", {"day"}),
+          ):
+              queued.clear()
+              item = dict(base)
+              item["HistoryResolution"] = selected
+              sender.send_all([item])
+              actual = {row["HistoryResolution"] for row in queued}
+              assert actual == expected, (selected, actual, expected)
+
+          print("SENDER TIME RESOLUTION HIERARCHY TEST OK")
           PY
 
       - name: Verify TIME LIVE sender contract

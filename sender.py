@@ -16,6 +16,7 @@ from edge_data import mark_aggregates_queued
 
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
+TIME_RESOLUTION_RANK = {"minute": 0, "hour": 1, "day": 2}
 
 
 def _send_live_batch(items):
@@ -180,9 +181,13 @@ def send_all(data):
                 aggregate_resolution = str(
                     aggregate.get("HistoryResolution", resolution)
                 ).strip().lower()
-                if aggregate_resolution not in {"minute", "hour", "day"}:
+                if aggregate_resolution not in TIME_RESOLUTION_RANK:
                     continue
-                if resolution and aggregate_resolution != resolution:
+                if (
+                    resolution in TIME_RESOLUTION_RANK
+                    and TIME_RESOLUTION_RANK[aggregate_resolution]
+                    < TIME_RESOLUTION_RANK[resolution]
+                ):
                     continue
                 queue_items.append({
                     "PLC_ID": plc_id,

@@ -282,22 +282,24 @@ def record_time_sample(plc_id, tag, value, timestamp, history_resolution="minute
                     start = _period_end(start, current_resolution)
 
             rows = []
-            table = _table(resolution)
-            for row in conn.execute(
-                f"""
-                SELECT ID, PLC_ID, TagName, PeriodStart, PeriodEnd,
-                       FirstValue, LastValue, MinValue, MaxValue,
-                       WeightedAverage, DurationSeconds, SampleCount
-                FROM {table}
-                WHERE PLC_ID=? AND LOWER(TagName)=LOWER(?)
-                  AND UploadQueued=0 AND PeriodEnd <= ?
-                ORDER BY PeriodStart ASC
-                """,
-                (int(plc_id), str(tag), timestamp_text),
-            ).fetchall():
-                item = dict(row)
-                item["HistoryResolution"] = resolution
-                rows.append(item)
+            start_index = _RESOLUTIONS.index(resolution)
+            for current_resolution in _RESOLUTIONS[start_index:]:
+                table = _table(current_resolution)
+                for row in conn.execute(
+                    f"""
+                    SELECT ID, PLC_ID, TagName, PeriodStart, PeriodEnd,
+                           FirstValue, LastValue, MinValue, MaxValue,
+                           WeightedAverage, DurationSeconds, SampleCount
+                    FROM {table}
+                    WHERE PLC_ID=? AND LOWER(TagName)=LOWER(?)
+                      AND UploadQueued=0 AND PeriodEnd <= ?
+                    ORDER BY PeriodStart ASC
+                    """,
+                    (int(plc_id), str(tag), timestamp_text),
+                ).fetchall():
+                    item = dict(row)
+                    item["HistoryResolution"] = current_resolution
+                    rows.append(item)
 
             conn.commit()
             return rows
