@@ -17,7 +17,7 @@ if errorlevel 1 (
 )
 
 set "VBS=%~dp0run_edge_management.vbs"
-schtasks /Create /TN "SCADA FLOW Edge Management" /SC ONLOGON /RL HIGHEST /TR "wscript.exe \"%VBS%"" /F
+schtasks /Create /TN "SCADA FLOW Edge Management" /SC ONLOGON /RL HIGHEST /TR "wscript.exe ""%VBS%""" /F
 if errorlevel 1 (
     echo Failed to create the scheduled task.
     pause
