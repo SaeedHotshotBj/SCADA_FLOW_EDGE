@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import config
 import plc
 
-TZ = ZoneInfo("Asia/Tehran")
+from timezone_utils import TZ
 _calculation_cache = None
 _calculation_cache_time = 0.0
 _latest_tags = {}

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import config
 
-TZ = ZoneInfo("Asia/Tehran")
+from timezone_utils import TZ
 MINUTE_RETENTION_HOURS = max(2, int(getattr(config, "CALCULATED_MINUTE_RETENTION_HOURS", 2)))
 HOUR_RETENTION_DAYS = max(2, int(getattr(config, "CALCULATED_HOUR_RETENTION_DAYS", 2)))
 DAY_RETENTION_DAYS = max(1, int(getattr(config, "CALCULATED_DAY_RETENTION_DAYS", 600)))

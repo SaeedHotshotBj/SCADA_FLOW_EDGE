@@ -24,7 +24,7 @@ from store_forward import (
     rows_to_payload,
 )
 
-TZ = ZoneInfo("Asia/Tehran")
+from timezone_utils import TZ
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
 
