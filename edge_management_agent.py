@@ -299,6 +299,9 @@ def read_file(relative_path):
     if not path.is_file():
         raise FileNotFoundError("File does not exist")
 
+    if _is_protected(path, normalized):
+        raise PermissionError("This file is protected from remote reading")
+
     size = path.stat().st_size
     if size > MAX_READ_BYTES:
         raise ValueError("File is too large to read remotely")
