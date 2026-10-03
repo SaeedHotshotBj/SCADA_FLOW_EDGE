@@ -1,0 +1,8 @@
+{
+  "server_url": "https://scada.khze.org",
+  "company_id": 1,
+  "edge_id": "EDGE-COMPUTER-01",
+  "pairing_token": "PASTE-PAIRING-CODE-HERE",
+  "poll_interval": 2,
+  "auto_start": true
+}
