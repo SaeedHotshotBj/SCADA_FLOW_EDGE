@@ -1,0 +1,109 @@
+name: Storage TIME LIVE tests
+
+on:
+  push:
+    branches: ["refactor/storage-time-live-architecture"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  storage-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Edge Python modules
+        run: python -m compileall -q .
+
+      - name: Verify local TIME weighted aggregates
+        run: |
+          python - <<'PY'
+          import os
+          import tempfile
+          import sqlite3
+          import config
+          import edge_data
+
+          fd, path = tempfile.mkstemp(suffix=".db")
+          os.close(fd)
+          try:
+              config.STORE_FORWARD_DB = path
+              edge_data.init_edge_data()
+
+              edge_data.record_time_sample(1, "X", 0, "2026-10-03 11:00:10", "minute")
+              edge_data.record_time_sample(1, "X", 10, "2026-10-03 11:00:40", "minute")
+              closed = edge_data.record_time_sample(1, "X", 10, "2026-10-03 11:01:10", "minute")
+
+              conn = sqlite3.connect(path)
+              row = conn.execute(
+                  "SELECT WeightedAverage, DurationSeconds, SampleCount "
+                  "FROM TrendMinute WHERE PLC_ID=1 AND TagName='X' AND PeriodStart='2026-10-03 11:00:00'"
+              ).fetchone()
+              assert row is not None
+              assert abs(float(row[0]) - 4.0) < 1e-9, row
+              assert abs(float(row[1]) - 50.0) < 1e-9, row
+              assert int(row[2]) == 2, row
+
+              # A completed minute is available for export exactly once until
+              # Store & Forward marks it durable.
+              assert len(closed) == 1, closed
+              assert closed[0]["HistoryResolution"] == "minute"
+
+              edge_data.mark_aggregates_queued(closed)
+              closed_again = edge_data.record_time_sample(
+                  1, "X", 20, "2026-10-03 11:02:10", "minute"
+              )
+              assert all(
+                  item["PeriodStart"] != "2026-10-03 11:00:00"
+                  for item in closed_again
+              ), closed_again
+
+              conn.close()
+              print("TIME WEIGHTED AGGREGATE TEST OK")
+          finally:
+              try:
+                  os.remove(path)
+              except OSError:
+                  pass
+          PY
+
+      - name: Verify TIME LIVE sender contract
+        run: |
+          python - <<'PY'
+          import config
+          from store_forward import rows_to_payload
+
+          row = {
+              "EventID": "test",
+              "PLC_ID": 1,
+              "TagName": "X",
+              "Value": 4.0,
+              "Timestamp": "2026-10-03 11:00:00",
+              "StorageType": "TIME",
+              "HistoryResolution": "minute",
+              "PeriodEnd": "2026-10-03 11:01:00",
+              "FirstValue": 0.0,
+              "LastValue": 10.0,
+              "MinValue": 0.0,
+              "MaxValue": 10.0,
+              "WeightedAverage": 4.0,
+              "DurationSeconds": 50.0,
+              "SampleCount": 2,
+          }
+          payload = rows_to_payload([row])[0]
+          assert payload["StorageType"] == "TIME"
+          assert payload["HistoryResolution"] == "minute"
+          assert payload["WeightedAverage"] == 4.0
+          print("STORE & FORWARD AGGREGATE CONTRACT OK")
+          PY
