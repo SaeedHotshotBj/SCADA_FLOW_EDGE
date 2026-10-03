@@ -695,6 +695,7 @@ def read_all():
                 "TagName": name,
                 "Value": value,
                 "StorageType": mapping["storage"],
+                "HistoryResolution": mapping.get("history_resolution", "ALL"),
                 "CommunicationTimeout": communication_timeout,
             })
 
