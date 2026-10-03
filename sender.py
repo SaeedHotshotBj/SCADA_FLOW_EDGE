@@ -1,5 +1,6 @@
 import hashlib
 import requests
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,8 @@ from store_forward import (
 from timezone_utils import TZ
 BATCH_SIZE = max(1, int(getattr(config, "STORE_FORWARD_BATCH_SIZE", 100)))
 SEND_TIMEOUT = float(getattr(config, "STORE_FORWARD_SEND_TIMEOUT", 10.0))
+RETRY_BACKOFF_SECONDS = max(1.0, float(getattr(config, "STORE_FORWARD_RETRY_BACKOFF_SECONDS", 5.0)))
+_next_flush_attempt = 0.0
 
 
 def _timestamp():
@@ -112,14 +115,24 @@ def _queue_calculated_aggregates():
 
 def flush_queue():
     """Send historical aggregates/events oldest-first; delete only after ACK."""
+    global _next_flush_attempt
+
+    now = time.monotonic()
+    if now < _next_flush_attempt:
+        return False
+
     while True:
         rows = get_batch(BATCH_SIZE)
         if not rows:
+            _next_flush_attempt = 0.0
             return True
 
         if not _send_historical_batch(rows):
             increment_retries([row["EventID"] for row in rows])
+            _next_flush_attempt = time.monotonic() + RETRY_BACKOFF_SECONDS
             return False
+
+        _next_flush_attempt = 0.0
 
 
 def _send_historical_batch(rows):
@@ -146,23 +159,41 @@ def _send_historical_batch(rows):
 
         acks = result.get("acks", [])
         if not isinstance(acks, list):
+            print("STORE & FORWARD INVALID ACK LIST:", result)
             return False
 
-        delete_acked(acks)
+        ack_ids = {str(item).strip() for item in acks if str(item).strip()}
+        all_ids = {str(row.get("EventID", "")).strip() for row in rows}
+
+        delete_acked(ack_ids)
 
         errors = result.get("errors") or []
-        if errors:
-            increment_retries(
-                [
-                    item.get("EventID")
-                    for item in errors
-                    if isinstance(item, dict)
-                ]
-            )
+        error_ids = set()
+        if isinstance(errors, list):
+            error_ids = {
+                str(item.get("EventID")).strip()
+                for item in errors
+                if isinstance(item, dict) and str(item.get("EventID")).strip()
+            }
+            if errors:
+                print(
+                    "STORE & FORWARD SERVER REJECTIONS:",
+                    errors,
+                )
+
+        unresolved_ids = all_ids - ack_ids
+        if unresolved_ids:
+            unexpected = unresolved_ids - error_ids
+            if unexpected:
+                print(
+                    "STORE & FORWARD MISSING ACKS:",
+                    sorted(unexpected),
+                )
+            return False
 
         print(
             "STORE & FORWARD ACK:",
-            len(acks),
+            len(ack_ids),
             "PENDING:",
             pending_count(),
         )
