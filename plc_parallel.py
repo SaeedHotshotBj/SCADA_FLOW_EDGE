@@ -4,6 +4,9 @@ from datetime import datetime
 import plc as _plc
 
 
+TRIGGER_SIGNAL_PREFIX = "__TRIGGER_REGISTER_"
+
+
 def _read_one_plc(plc_config, plc_mappings, now):
     """Read one PLC independently using the same Flow-driven rules as plc.py."""
     plc_id = plc_config["plc_id"]
@@ -146,6 +149,9 @@ def _read_one_plc(plc_config, plc_mappings, now):
             if int(mapping["trigger_register"]) == trigger_register
         ]
 
+        # Dependent TRIGGER samples must be queued before the synthetic
+        # trigger signal. The server uses their Store & Forward order to
+        # reconstruct the exact snapshot belonging to this signal.
         for mapping in dependent:
             expected = mapping.get("trigger_value", 0)
 
@@ -200,6 +206,19 @@ def _read_one_plc(plc_config, plc_mappings, now):
                 "TRIGGER REGISTER:", trigger_register,
                 "TRIGGER VALUE:", expected
             )
+
+        # Emit the trigger-register sample on every scan, including both
+        # inactive and active states. This is the signal consumed by the
+        # server-side Rise/Fall state machine. A repeated 0->1 transition
+        # therefore produces a new independent production event.
+        data.append({
+            "PLC_ID": plc_id,
+            "TagName": f"{TRIGGER_SIGNAL_PREFIX}{trigger_register}",
+            "Value": trigger_value,
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip("."),
+            "StorageType": "TRIGGER_SIGNAL",
+            "CommunicationTimeout": communication_timeout,
+        })
 
     return data
 
