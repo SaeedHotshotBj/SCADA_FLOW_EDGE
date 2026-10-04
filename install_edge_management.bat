@@ -17,17 +17,24 @@ if errorlevel 1 (
 )
 
 set "VBS=%~dp0run_edge_management.vbs"
-schtasks /Create /TN "SCADA FLOW Edge Management" /SC ONLOGON /RL HIGHEST /TR "wscript.exe ""%VBS%""" /F
+
+rem Use the current Windows user Run key so no Administrator permission is required.
+rem Keep run_edge_management.vbs inside this project folder.
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "SCADA Edge Management" /t REG_SZ /d "wscript.exe \"%VBS%"" /f
 if errorlevel 1 (
-    echo Failed to create the scheduled task.
+    echo Failed to register automatic startup.
     pause
     exit /b 1
 )
 
+rem Remove the older scheduled-task installation when possible.
+schtasks /Delete /TN "SCADA FLOW Edge Management" /F >nul 2>&1
+
 start "" wscript.exe "%VBS%"
 echo.
 echo SCADA FLOW Edge Management Agent installed and started.
-echo It will start automatically when the user logs on.
+echo It will start automatically when this Windows user logs on.
+echo Administrator permission is not required for automatic startup.
 echo.
 pause
 
