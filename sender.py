@@ -208,13 +208,15 @@ def send_all(data):
                 aggregate_keys.append(aggregate)
             continue
 
-        if storage == "TRIGGER":
+        if storage in {"TRIGGER", "TRIGGER_SIGNAL"}:
+            # Keep dependent TRIGGER samples and their synthetic signal in
+            # exactly the order produced by plc_parallel.read_all().
             queue_items.append({
                 "PLC_ID": plc_id,
                 "TagName": tag,
                 "Value": item.get("Value"),
                 "Timestamp": item.get("Timestamp"),
-                "StorageType": "TRIGGER",
+                "StorageType": storage,
                 "CommunicationTimeout": item.get("CommunicationTimeout"),
             })
 
